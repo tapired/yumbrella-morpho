@@ -18,3 +18,5 @@ node_modules/
 
 yarn.lock
 .DS_Store
+.venv-vyper037/
+.venv-vyper037-py39/

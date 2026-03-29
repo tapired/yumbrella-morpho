@@ -1,12 +1,15 @@
 -include .env
 
+VYPER_PATH := $(CURDIR)/.venv-vyper037-py39/bin
+FORGE := PATH="$(VYPER_PATH):$$PATH" forge
+
 # deps
-update:; forge update
-build  :; forge build
-size  :; forge build --sizes
+update:; $(FORGE) update
+build  :; $(FORGE) build
+size  :; $(FORGE) build --sizes
 
 # storage inspection
-inspect :; forge inspect ${contract} storage-layout --pretty
+inspect :; $(FORGE) inspect ${contract} storage-layout --pretty
 
 # specify which fork to use. set this in our .env
 # if we want to test multiple forks in one go, remove this as an argument below
@@ -16,26 +19,26 @@ FORK_URL := ${ETH_RPC_URL} # BASE_RPC_URL, ETH_RPC_URL, ARBITRUM_RPC_URL
 test := test_
 
 # local tests without fork
-test  :; forge test -vv --fork-url ${FORK_URL} --ffi
-trace  :; forge test -vvv --fork-url ${FORK_URL} --ffi
-gas  :; forge test --fork-url ${FORK_URL} --gas-report --ffi
-test-contract  :; forge test -vv --match-contract $(contract) --fork-url ${FORK_URL} --ffi
-test-contract-gas  :; forge test --gas-report --match-contract ${contract} --fork-url ${FORK_URL} --ffi
-trace-contract  :; forge test -vvv --match-contract $(contract) --fork-url ${FORK_URL} --ffi
-test-test  :; forge test -vv --match-test $(test) --fork-url ${FORK_URL} --ffi
-test-test-trace  :; forge test -vvv --match-test $(test) --fork-url ${FORK_URL} --ffi
-trace-test  :; forge test -vvvvv --match-test $(test) --fork-url ${FORK_URL} --ffi
-snapshot :; forge snapshot -vv --fork-url ${FORK_URL} --ffi
-snapshot-diff :; forge snapshot --diff -vv --fork-url ${FORK_URL} --ffi
-trace-setup  :; forge test -vvvv --fork-url ${FORK_URL} --ffi
-trace-max  :; forge test -vvvvv --fork-url ${FORK_URL} --ffi
-coverage :; forge coverage --fork-url ${FORK_URL} --ffi
-coverage-report :; forge coverage --report lcov --fork-url ${FORK_URL} --ffi
-coverage-debug :; forge coverage --report debug --fork-url ${FORK_URL} --ffi
+test  :; $(FORGE) test -vv --fork-url ${FORK_URL} --ffi
+trace  :; $(FORGE) test -vvv --fork-url ${FORK_URL} --ffi
+gas  :; $(FORGE) test --fork-url ${FORK_URL} --gas-report --ffi
+test-contract  :; $(FORGE) test -vv --match-contract $(contract) --fork-url ${FORK_URL} --ffi
+test-contract-gas  :; $(FORGE) test --gas-report --match-contract ${contract} --fork-url ${FORK_URL} --ffi
+trace-contract  :; $(FORGE) test -vvv --match-contract $(contract) --fork-url ${FORK_URL} --ffi
+test-test  :; $(FORGE) test -vv --match-test $(test) --fork-url ${FORK_URL} --ffi
+test-test-trace  :; $(FORGE) test -vvv --match-test $(test) --fork-url ${FORK_URL} --ffi
+trace-test  :; $(FORGE) test -vvvvv --match-test $(test) --fork-url ${FORK_URL} --ffi
+snapshot :; $(FORGE) snapshot -vv --fork-url ${FORK_URL} --ffi
+snapshot-diff :; $(FORGE) snapshot --diff -vv --fork-url ${FORK_URL} --ffi
+trace-setup  :; $(FORGE) test -vvvv --fork-url ${FORK_URL} --ffi
+trace-max  :; $(FORGE) test -vvvvv --fork-url ${FORK_URL} --ffi
+coverage :; $(FORGE) coverage --fork-url ${FORK_URL} --ffi
+coverage-report :; $(FORGE) coverage --report lcov --fork-url ${FORK_URL} --ffi
+coverage-debug :; $(FORGE) coverage --report debug --fork-url ${FORK_URL} --ffi
 
 coverage-html:
 	@echo "Running coverage..."
-	forge coverage --report lcov --fork-url ${FORK_URL} --ffi
+	$(FORGE) coverage --report lcov --fork-url ${FORK_URL} --ffi
 	@if [ "`uname`" = "Darwin" ]; then \
 		lcov --ignore-errors inconsistent --remove lcov.info 'src/test/**' --output-file lcov.info; \
 		genhtml --ignore-errors inconsistent -o coverage-report lcov.info; \
@@ -45,4 +48,4 @@ coverage-html:
 	fi
 	@echo "Coverage report generated at coverage-report/index.html"
 
-clean  :; forge clean
+clean  :; $(FORGE) clean

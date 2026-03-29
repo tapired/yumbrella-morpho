@@ -37,12 +37,13 @@ contract YumbrellaFactory {
         address _asset,
         string calldata _name,
         address _seniorVault,
-        address _assetToSeniorOracle
+        address _assetToSeniorOracle,
+        address _yieldVault
     ) external virtual returns (address) {
         // tokenized strategies available setters.
         IYumbrella _newYumbrella = IYumbrella(
             address(
-                new Yumbrella(_asset, _name, _seniorVault, _assetToSeniorOracle)
+                new Yumbrella(_asset, _name, _seniorVault, _assetToSeniorOracle, _yieldVault)
             )
         );
 

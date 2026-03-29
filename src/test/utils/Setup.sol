@@ -48,6 +48,7 @@ contract Setup is ExtendedTest, IEvents, Clonable {
 
     // Address of the real deployed Factory
     address public factory;
+    address public yieldVault = 0xBe53A109B494E5c9f97b9Cd39Fe969BE68BF6204; // yvUSDC-1
 
     // Integer variables that will be used repeatedly.
     uint256 public decimals;
@@ -64,7 +65,7 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         _setTokenAddrs();
 
         // Set asset
-        asset = ERC20(tokenAddrs["DAI"]);
+        asset = ERC20(tokenAddrs["USDC"]);
 
         // Set decimals
         decimals = asset.decimals();
@@ -137,7 +138,8 @@ contract Setup is ExtendedTest, IEvents, Clonable {
                     address(asset),
                     "Tokenized Strategy",
                     address(seniorVault),
-                    address(assetToSeniorOracle)
+                    address(assetToSeniorOracle),
+                    yieldVault
                 )
             )
         );

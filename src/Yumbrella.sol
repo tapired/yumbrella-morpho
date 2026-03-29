@@ -7,6 +7,7 @@ import {IVault} from "@yearn-vaults/interfaces/IVault.sol";
 import {IVaultFactory} from "@yearn-vaults/interfaces/IVaultFactory.sol";
 import {TokenizedStaker, ERC20, SafeERC20} from "@periphery/Bases/Staker/TokenizedStaker.sol";
 import {Auction} from "@periphery/Auctions/Auction.sol";
+import {IStrategy} from "@tokenized-strategy/interfaces/IStrategy.sol";
 
 interface IValtCorrected {
     function FACTORY() external view returns (address);
@@ -29,6 +30,7 @@ contract Yumbrella is TokenizedStaker {
 
     /// @notice The senior vault that will use Yumbrella as its accountant.
     IVault public immutable SENIOR_VAULT;
+    IStrategy public immutable vault; // yield vault
 
     /// @notice The underlying asset of the senior vault.
     ERC20 public immutable SENIOR_ASSET;
@@ -38,6 +40,9 @@ contract Yumbrella is TokenizedStaker {
 
     /// @notice The auction contract that will be used to sell the token for losses.
     address public auction;
+
+    /// @notice The auction contract that will be used to sell the rewards.
+    address public rewardAuction;
 
     /// @notice The ratio of the loss to try to refund to the senior vault.
     uint256 public refundRatio;
@@ -65,12 +70,16 @@ contract Yumbrella is TokenizedStaker {
         address _asset,
         string memory _name,
         address _seniorVault,
-        address _assetToSeniorAssetOracle
+        address _assetToSeniorAssetOracle,
+        address _yieldVault
     ) TokenizedStaker(_asset, _name) {
         SENIOR_VAULT = IVault(_seniorVault);
+        require(IStrategy(_yieldVault).asset() == _asset, "wrong vault");
+        vault = IStrategy(_yieldVault);
         SENIOR_ASSET = ERC20(SENIOR_VAULT.asset());
         VAULT_FACTORY = IVaultFactory(IValtCorrected(_seniorVault).FACTORY());
         assetToSeniorAssetOracle = IOracle(_assetToSeniorAssetOracle);
+        asset.safeApprove(_yieldVault, type(uint256).max);
 
         seniorVaultPerformanceFee = 1_000;
         refundRatio = 10_000;
@@ -85,9 +94,23 @@ contract Yumbrella is TokenizedStaker {
                 NEEDED TO BE OVERRIDDEN BY STRATEGIST
     //////////////////////////////////////////////////////////////*/
 
-    function _deployFunds(uint256 _amount) internal override {}
+    function _deployFunds(uint256 _amount) internal override {
+        vault.deposit(_amount, address(this));
+        _stake();
+    }
 
-    function _freeFunds(uint256 _amount) internal override {}
+    function _freeFunds(uint256 _amount) internal override {
+        uint256 shares = vault.previewWithdraw(_amount);
+        uint256 vaultBalance = balanceOfVault();
+        if (shares > vaultBalance) {
+            unchecked {
+                _unStake(shares - vaultBalance);
+            }
+            shares = Math.min(shares, balanceOfVault());
+        }
+
+        vault.redeem(shares, address(this), address(this));
+    }
 
     function _postWithdrawHook(
         uint256 assets,
@@ -110,7 +133,7 @@ contract Yumbrella is TokenizedStaker {
     ) external view returns (uint256) {
         uint256 currentAssets = SENIOR_VAULT.totalAssets();
         uint256 maxAssets = (_fromAssetToSeniorAsset(
-            asset.balanceOf(address(this))
+            valueOfVault()
         ) * collateralRatio) / WAD;
 
         return currentAssets >= maxAssets ? 0 : maxAssets - currentAssets;
@@ -157,14 +180,17 @@ contract Yumbrella is TokenizedStaker {
             );
         } else {
             // Check if the auction was kicked and filled.
-            require(
-                Auction(auction).available(address(asset)) == 0,
-                "auction not filled"
-            );
+            if (auction != address(0)) {
+                require(
+                    Auction(auction).available(address(asset)) == 0,
+                    "auction not filled"
+                );
+            }
             _refunds = Math.min(
                 (_loss * refundRatio) / MAX_BPS,
-                SENIOR_ASSET.balanceOf(address(this))
+                valueOfVault()
             );
+            _freeFunds(_refunds);
             SENIOR_ASSET.forceApprove(address(SENIOR_VAULT), _refunds);
         }
     }
@@ -174,7 +200,38 @@ contract Yumbrella is TokenizedStaker {
         override
         returns (uint256 _totalAssets)
     {
-        _totalAssets = asset.balanceOf(address(this));
+        _claimAndSellRewards();
+        _totalAssets = balanceOfAsset() + valueOfVault();
+    }
+
+    function _stake() internal virtual {}
+
+    function _unStake(uint256 _amount) internal virtual {}
+
+    function _claimAndSellRewards() internal virtual {}
+
+    function balanceOfAsset() public view returns (uint256) {
+        return asset.balanceOf(address(this));
+    }
+
+    function balanceOfVault() public view returns (uint256) {
+        return vault.balanceOf(address(this));
+    }
+
+    function balanceOfStake() public view returns (uint256) {
+        return 0;
+    }
+
+    function valueOfVault() public view returns (uint256) {
+        return vault.convertToAssets(balanceOfVault() + balanceOfStake());
+    }
+
+    function vaultsMaxWithdraw() public view returns (uint256) {
+        return vault.convertToAssets(vault.maxRedeem(address(this)));
+    }
+
+    function availableDepositLimit(address) public view override returns (uint256) {
+        return vault.maxDeposit(address(this));
     }
 
     /**
@@ -238,7 +295,7 @@ contract Yumbrella is TokenizedStaker {
             // And the window has not passed
             request.timestamp + withdrawWindow > block.timestamp
         ) {
-            return request.amount;
+            return Math.min(request.amount, balanceOfAsset() + vaultsMaxWithdraw());
         }
         return 0;
     }
@@ -296,14 +353,18 @@ contract Yumbrella is TokenizedStaker {
         }
 
         if (_loss > 0) {
-            uint256 toAuction = Math.min(
-                _fromSeniorAssetToAsset((_loss * refundRatio) / MAX_BPS),
-                asset.balanceOf(address(this))
-            );
-            asset.safeTransfer(address(auction), toAuction);
-            Auction(auction).kick(address(asset));
-            // Eat the loss.
-            IKeeper(TokenizedStrategy.keeper()).report(address(this));
+            if (auction != address(0)) {
+                uint256 toAuction = Math.min(
+                    _fromSeniorAssetToAsset((_loss * refundRatio) / MAX_BPS),
+                    valueOfVault()
+                );
+                toAuction = Math.min(toAuction, vaultsMaxWithdraw());
+                _freeFunds(toAuction);
+                asset.safeTransfer(address(auction), toAuction);
+                Auction(auction).kick(address(asset));
+                // Eat the loss.
+                IKeeper(TokenizedStrategy.keeper()).report(address(this));
+            }
         }
     }
 
@@ -341,8 +402,34 @@ contract Yumbrella is TokenizedStaker {
                 Auction(_auction).want() == address(SENIOR_ASSET),
                 "wrong want"
             );
+            require(Auction(_auction).receiver() == address(this), "wrong receiver");
         }
         auction = _auction;
+    }
+
+    /**
+     * @dev Set the reward auction address.
+     * @param _rewardAuction The address of the reward auction.
+     */
+    function setRewardAuction(address _rewardAuction) external onlyEmergencyAuthorized {
+        if (_rewardAuction != address(0)) {
+            require(Auction(_rewardAuction).want() == address(asset), "wrong want");
+            require(Auction(_rewardAuction).receiver() == address(this), "wrong receiver");
+        }
+        rewardAuction = _rewardAuction;
+    }
+
+    function enableAuction(address _from, address _auction) external onlyEmergencyAuthorized {
+        require(_auction == auction || _auction == rewardAuction, "wrong auction");
+        if (_auction == auction) {
+            // asset to senior asset auction
+            require(_from == address(asset), "wrong from");
+        } 
+        else {
+            // reward auction
+            require(_from != address(asset) && _from != address(SENIOR_ASSET) && _from != address(SENIOR_VAULT), "wrong from");
+        }
+        Auction(_auction).enable(_from);
     }
 
     /**
@@ -412,5 +499,9 @@ contract Yumbrella is TokenizedStaker {
         onlyManagement
     {
         collateralRatio = _collateralRatio;
+    }
+
+    function _emergencyWithdraw(uint256 _amount) internal override {
+        _freeFunds(Math.min(_amount, vaultsMaxWithdraw()));
     }
 }

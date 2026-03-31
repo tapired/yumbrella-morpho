@@ -39,7 +39,7 @@ contract FunctionSignatureTest is Setup {
         assertEq(yumbrella.fullProfitUnlockDate(), 0, "unlock date");
         assertEq(yumbrella.profitUnlockingRate(), 0, "unlock rate");
         assertGt(yumbrella.lastReport(), 0, "last report");
-        assertEq(yumbrella.pricePerShare(), 10**asset.decimals(), "pps");
+        assertEq(yumbrella.pricePerShare(), 10 ** asset.decimals(), "pps");
         assertTrue(!yumbrella.isShutdown());
         assertEq(
             yumbrella.symbol(),

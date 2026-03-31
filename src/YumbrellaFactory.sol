@@ -43,7 +43,13 @@ contract YumbrellaFactory {
         // tokenized strategies available setters.
         IYumbrella _newYumbrella = IYumbrella(
             address(
-                new Yumbrella(_asset, _name, _seniorVault, _assetToSeniorOracle, _yieldVault)
+                new Yumbrella(
+                    _asset,
+                    _name,
+                    _seniorVault,
+                    _assetToSeniorOracle,
+                    _yieldVault
+                )
             )
         );
 
@@ -72,11 +78,9 @@ contract YumbrellaFactory {
         keeper = _keeper;
     }
 
-    function isDeployedStrategy(address _yumbrella)
-        external
-        view
-        returns (bool)
-    {
+    function isDeployedStrategy(
+        address _yumbrella
+    ) external view returns (bool) {
         address _asset = IYumbrella(_yumbrella).asset();
         return deployments[_asset] == _yumbrella;
     }

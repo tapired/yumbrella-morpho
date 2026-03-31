@@ -6,6 +6,9 @@ import {ExtendedTest} from "./ExtendedTest.sol";
 import {VyperDeployer} from "./VyperDeployer.sol";
 
 import {Yumbrella, ERC20, IOracle, IVault} from "../../Yumbrella.sol";
+import {MorphoLossAwareCompounder} from "../../MorphoLossAwareCompounder.sol";
+import {IMorphoLossAwareCompounder} from "../../interfaces/IMorphoLossAwareCompounder.sol";
+import {MorphoLossAwareCompounderFactory} from "../../MorphoLossAwareCompounderFactory.sol";
 import {YumbrellaFactory} from "../../YumbrellaFactory.sol";
 import {IYumbrella} from "../../interfaces/IYumbrella.sol";
 
@@ -13,6 +16,7 @@ import {MockOracle} from "../Mocks/MockOracle.sol";
 import {Clonable} from "@periphery/utils/Clonable.sol";
 
 import {Roles} from "@yearn-vaults/interfaces/Roles.sol";
+import {IBaseHealthCheck} from "@periphery/Bases/HealthCheck/IBaseHealthCheck.sol";
 
 // Inherit the events so they can be checked if desired.
 import {IEvents} from "@tokenized-strategy/interfaces/IEvents.sol";
@@ -27,16 +31,20 @@ interface IFactory {
 
 contract Setup is ExtendedTest, IEvents, Clonable {
     // Contract instances that we will use repeatedly.
-    ERC20 public asset;
+    ERC20 public asset; // yumbrella asset
     IYumbrella public yumbrella;
     YumbrellaFactory public yumbrellaFactory;
+    MorphoLossAwareCompounderFactory public morphoLossAwareCompounderFactory;
+    IMorphoLossAwareCompounder public morphoLossAwareCompounder;
 
     IVault public seniorVault;
+    ERC20 public seniorVaultAsset;
     IOracle public assetToSeniorOracle;
 
     VyperDeployer public vyperDeployer = new VyperDeployer();
 
     mapping(string => address) public tokenAddrs;
+    mapping(string => address) public yieldVaultAddrs;
 
     // Addresses for different roles we will use repeatedly.
     address public user = address(10);
@@ -48,24 +56,29 @@ contract Setup is ExtendedTest, IEvents, Clonable {
 
     // Address of the real deployed Factory
     address public factory;
-    address public yieldVault = 0xBe53A109B494E5c9f97b9Cd39Fe969BE68BF6204; // yvUSDC-1
+    address public yieldVault;
+    address public morphoVault;
 
     // Integer variables that will be used repeatedly.
     uint256 public decimals;
     uint256 public MAX_BPS = 10_000;
 
     // Fuzz from $0.01 of 1e6 stable coins up to 1 trillion of a 1e18 coin
-    uint256 public maxFuzzAmount = 1e30;
-    uint256 public minFuzzAmount = 10_000;
+    uint256 public maxFuzzAmount = 1e6 * 1e6; // 1M USDC
+    uint256 public minFuzzAmount = 1e6;
 
     // Default profit max unlock time is set for 10 days
     uint256 public profitMaxUnlockTime = 10 days;
 
     function setUp() public virtual {
         _setTokenAddrs();
+        _setYieldVaultAddrs();
 
         // Set asset
         asset = ERC20(tokenAddrs["USDC"]);
+        yieldVault = yieldVaultAddrs["USDC"];
+        seniorVaultAsset = ERC20(tokenAddrs["USDC"]);
+        morphoVault = 0xF9bdDd4A9b3A45f980e11fDDE96e16364dDBEc49; // yearn og usdc
 
         // Set decimals
         decimals = asset.decimals();
@@ -77,6 +90,14 @@ contract Setup is ExtendedTest, IEvents, Clonable {
             emergencyAdmin
         );
 
+        morphoLossAwareCompounderFactory = new MorphoLossAwareCompounderFactory(
+            management,
+            performanceFeeRecipient,
+            keeper,
+            emergencyAdmin
+        );
+
+        morphoLossAwareCompounder = setUpMorphoLossAwareCompounder();
         seniorVault = setUpVault();
 
         assetToSeniorOracle = new MockOracle();
@@ -99,6 +120,27 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         vm.label(performanceFeeRecipient, "performanceFeeRecipient");
     }
 
+    function setUpMorphoLossAwareCompounder()
+        public
+        returns (IMorphoLossAwareCompounder)
+    {
+        IMorphoLossAwareCompounder _compounder = IMorphoLossAwareCompounder(
+            morphoLossAwareCompounderFactory.newMorphoLossAwareCompounder(
+                address(seniorVaultAsset),
+                "Morpho Loss Aware Compounder",
+                morphoVault
+            )
+        );
+
+        vm.prank(management);
+        _compounder.acceptManagement();
+
+        vm.prank(management);
+        IBaseHealthCheck(address(_compounder)).setLossLimitRatio(5_000); // 50%
+
+        return _compounder;
+    }
+
     function setUpVault() public returns (IVault) {
         if (original == address(0)) {
             original = vyperDeployer.deployContract(
@@ -110,7 +152,7 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         IVault _vault = IVault(_clone());
 
         _vault.initialize(
-            address(asset),
+            address(seniorVaultAsset),
             "Test vault",
             "tsVault",
             management,
@@ -127,10 +169,10 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         return _vault;
     }
 
-    function setUpYumbrella(address _seniorVault, address _assetToSeniorOracle)
-        public
-        returns (address)
-    {
+    function setUpYumbrella(
+        address _seniorVault,
+        address _assetToSeniorOracle
+    ) public returns (address) {
         // we save the strategy as a IStrategyInterface to give it the needed interface
         IYumbrella _yumbrella = IYumbrella(
             address(
@@ -157,7 +199,19 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         seniorVault.set_accountant(address(_yumbrella));
 
         vm.prank(vaultManagement);
+        seniorVault.add_strategy(address(morphoLossAwareCompounder));
+
+        vm.prank(vaultManagement);
+        seniorVault.update_max_debt_for_strategy(
+            address(morphoLossAwareCompounder),
+            type(uint256).max
+        );
+
+        vm.prank(vaultManagement);
         seniorVault.set_use_default_queue(true);
+
+        vm.prank(vaultManagement);
+        seniorVault.set_auto_allocate(true);
 
         return address(_yumbrella);
     }
@@ -174,6 +228,18 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         _yumbrella.deposit(_amount, _user);
     }
 
+    function depositIntoSeniorVault(
+        IVault _seniorVault,
+        address _user,
+        uint256 _amount
+    ) public {
+        vm.prank(_user);
+        seniorVaultAsset.approve(address(_seniorVault), _amount);
+
+        vm.prank(_user);
+        _seniorVault.deposit(_amount, _user);
+    }
+
     function mintAndDepositIntoYumbrella(
         IYumbrella _yumbrella,
         address _user,
@@ -181,6 +247,15 @@ contract Setup is ExtendedTest, IEvents, Clonable {
     ) public {
         airdrop(asset, _user, _amount);
         depositIntoYumbrella(_yumbrella, _user, _amount);
+    }
+
+    function mintAndDepositIntoSeniorVault(
+        IVault _seniorVault,
+        address _user,
+        uint256 _amount
+    ) public {
+        airdrop(seniorVaultAsset, _user, _amount);
+        depositIntoSeniorVault(_seniorVault, _user, _amount);
     }
 
     // For checking the amounts in the strategy
@@ -202,11 +277,7 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         assertEq(_totalAssets, _totalDebt + _totalIdle, "!Added");
     }
 
-    function airdrop(
-        ERC20 _asset,
-        address _to,
-        uint256 _amount
-    ) public {
+    function airdrop(ERC20 _asset, address _to, uint256 _amount) public {
         uint256 balanceBefore = _asset.balanceOf(_to);
         deal(address(_asset), _to, balanceBefore + _amount);
     }
@@ -233,5 +304,9 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         tokenAddrs["USDT"] = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
         tokenAddrs["DAI"] = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
         tokenAddrs["USDC"] = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    }
+
+    function _setYieldVaultAddrs() internal {
+        yieldVaultAddrs["USDC"] = 0xBe53A109B494E5c9f97b9Cd39Fe969BE68BF6204; // yvUSDC-1
     }
 }

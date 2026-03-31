@@ -8,6 +8,7 @@ import {IVaultFactory} from "@yearn-vaults/interfaces/IVaultFactory.sol";
 import {TokenizedStaker, ERC20, SafeERC20} from "@periphery/Bases/Staker/TokenizedStaker.sol";
 import {Auction} from "@periphery/Auctions/Auction.sol";
 import {IStrategy} from "@tokenized-strategy/interfaces/IStrategy.sol";
+import {IMorphoLossAwareCompounder} from "./interfaces/IMorphoLossAwareCompounder.sol";
 
 interface IValtCorrected {
     function FACTORY() external view returns (address);
@@ -22,7 +23,7 @@ contract Yumbrella is TokenizedStaker {
     using SafeERC20 for ERC20;
 
     struct WithdrawRequest {
-        uint256 amount;
+        uint256 shares;
         uint256 timestamp;
     }
 
@@ -83,7 +84,7 @@ contract Yumbrella is TokenizedStaker {
 
         seniorVaultPerformanceFee = 1_000;
         refundRatio = 10_000;
-        collateralRatio = 100_000; // 10x
+        collateralRatio = 10e18; // 10x
         withdrawCooldown = 7 days;
         withdrawWindow = 7 days;
 
@@ -132,9 +133,8 @@ contract Yumbrella is TokenizedStaker {
         address /* _receiver */
     ) external view returns (uint256) {
         uint256 currentAssets = SENIOR_VAULT.totalAssets();
-        uint256 maxAssets = (_fromAssetToSeniorAsset(
-            valueOfVault()
-        ) * collateralRatio) / WAD;
+        uint256 maxAssets = (_fromAssetToSeniorAsset(valueOfVault()) *
+            collateralRatio) / WAD;
 
         return currentAssets >= maxAssets ? 0 : maxAssets - currentAssets;
     }
@@ -142,9 +142,11 @@ contract Yumbrella is TokenizedStaker {
     // Don't allow withdraws if any of the strategies have unrealised losses.
     function available_withdraw_limit(
         address _owner,
-        uint256, /* _maxLoss */
+        uint256 /* _maxLoss */,
         address[] calldata _strategies
     ) external view returns (uint256) {
+        // This check is basically ensures that if there is a loss on the senior vault strategies
+        // that are reported by "harvestAndReport" on the strategy level but not yet realized on the vault level.
         for (uint256 i = 0; i < _strategies.length; i++) {
             uint256 debt = SENIOR_VAULT.strategies(_strategies[i]).current_debt;
             if (debt > 0) {
@@ -152,16 +154,21 @@ contract Yumbrella is TokenizedStaker {
                     SENIOR_VAULT.assess_share_of_unrealised_losses(
                         _strategies[i],
                         debt
-                    ) != 0
+                    ) !=
+                    0 ||
+                    // but we also need to check if there are losses on the vaults strategies
+                    // that are not reported by "harvestAndReport" on the strategy level.
+                    IMorphoLossAwareCompounder(_strategies[i]).lossExists()
                 ) return 0;
             }
         }
 
-        return SENIOR_VAULT.convertToAssets(SENIOR_VAULT.balanceOf(_owner));
+        // but we also need to check if there are losses on the vaults strategies
+        // that are not reported by "harvestAndReport" on the strategy level.
     }
 
     function report(
-        address, /* _strategy */
+        address /* _strategy */,
         uint256 _gain,
         uint256 _loss
     ) external returns (uint256 _fees, uint256 _refunds) {
@@ -230,7 +237,9 @@ contract Yumbrella is TokenizedStaker {
         return vault.convertToAssets(vault.maxRedeem(address(this)));
     }
 
-    function availableDepositLimit(address) public view override returns (uint256) {
+    function availableDepositLimit(
+        address
+    ) public view override returns (uint256) {
         return vault.maxDeposit(address(this));
     }
 
@@ -239,11 +248,13 @@ contract Yumbrella is TokenizedStaker {
      * @param _amount The amount of `asset` to convert.
      * @return The amount of `seniorAsset` that corresponds to the `_amount` of `asset`.
      */
-    function _fromAssetToSeniorAsset(uint256 _amount)
-        internal
-        view
-        returns (uint256)
-    {
+    function _fromAssetToSeniorAsset(
+        uint256 _amount
+    ) internal view returns (uint256) {
+        if (address(assetToSeniorAssetOracle) == address(0)) {
+            // means that senior asset and asset are the same
+            return _amount;
+        }
         return (_amount * assetToSeniorAssetOracle.getRate()) / WAD;
     }
 
@@ -252,11 +263,13 @@ contract Yumbrella is TokenizedStaker {
      * @param _amount The amount of `seniorAsset` to convert.
      * @return The amount of `asset` that corresponds to the `_amount` of `seniorAsset`.
      */
-    function _fromSeniorAssetToAsset(uint256 _amount)
-        internal
-        view
-        returns (uint256)
-    {
+    function _fromSeniorAssetToAsset(
+        uint256 _amount
+    ) internal view returns (uint256) {
+        if (address(assetToSeniorAssetOracle) == address(0)) {
+            // means that senior asset and asset are the same
+            return _amount;
+        }
         return (_amount * WAD) / assetToSeniorAssetOracle.getRate();
     }
 
@@ -282,12 +295,9 @@ contract Yumbrella is TokenizedStaker {
      * @param . The address that is withdrawing from the strategy.
      * @return . The available amount that can be withdrawn in terms of `asset`
      */
-    function availableWithdrawLimit(address _owner)
-        public
-        view
-        override
-        returns (uint256)
-    {
+    function availableWithdrawLimit(
+        address _owner
+    ) public view override returns (uint256) {
         WithdrawRequest memory request = withdrawRequests[_owner];
         if (
             // If the cooldown period has passed
@@ -295,23 +305,28 @@ contract Yumbrella is TokenizedStaker {
             // And the window has not passed
             request.timestamp + withdrawWindow > block.timestamp
         ) {
-            return Math.min(request.amount, balanceOfAsset() + vaultsMaxWithdraw());
+            uint256 requestedAssets = TokenizedStrategy.convertToAssets(
+                request.shares
+            );
+            return
+                Math.min(
+                    requestedAssets + 1,
+                    balanceOfAsset() + vaultsMaxWithdraw() + 1
+                );
         }
         return 0;
     }
 
     // NOTE: This means users continue to earn rewards while unlocked but also can get slashed.
-    function requestWithdraw(uint256 _amount) external {
-        uint256 currentAmount = withdrawRequests[msg.sender].amount;
-        _amount = Math.min(
-            _amount + currentAmount,
-            TokenizedStrategy.convertToAssets(
-                TokenizedStrategy.balanceOf(msg.sender) // Should never accrue PPS
-            )
+    function requestWithdraw(uint256 _shares) external {
+        uint256 currentShares = withdrawRequests[msg.sender].shares;
+        _shares = Math.min(
+            _shares + currentShares,
+            TokenizedStrategy.balanceOf(msg.sender)
         );
 
         withdrawRequests[msg.sender] = WithdrawRequest({
-            amount: _amount,
+            shares: _shares,
             timestamp: block.timestamp + withdrawCooldown
         });
     }
@@ -337,9 +352,7 @@ contract Yumbrella is TokenizedStaker {
      *
      * @param . The current amount of idle funds that are available to deploy.
      */
-    function _tend(
-        uint256 /* _totalIdle */
-    ) internal override {
+    function _tend(uint256 /* _totalIdle */) internal override {
         uint256 _loss;
         address[] memory strategies = SENIOR_VAULT.get_default_queue();
         for (uint256 i = 0; i < strategies.length; i++) {
@@ -402,7 +415,10 @@ contract Yumbrella is TokenizedStaker {
                 Auction(_auction).want() == address(SENIOR_ASSET),
                 "wrong want"
             );
-            require(Auction(_auction).receiver() == address(this), "wrong receiver");
+            require(
+                Auction(_auction).receiver() == address(this),
+                "wrong receiver"
+            );
         }
         auction = _auction;
     }
@@ -411,23 +427,41 @@ contract Yumbrella is TokenizedStaker {
      * @dev Set the reward auction address.
      * @param _rewardAuction The address of the reward auction.
      */
-    function setRewardAuction(address _rewardAuction) external onlyEmergencyAuthorized {
+    function setRewardAuction(
+        address _rewardAuction
+    ) external onlyEmergencyAuthorized {
         if (_rewardAuction != address(0)) {
-            require(Auction(_rewardAuction).want() == address(asset), "wrong want");
-            require(Auction(_rewardAuction).receiver() == address(this), "wrong receiver");
+            require(
+                Auction(_rewardAuction).want() == address(asset),
+                "wrong want"
+            );
+            require(
+                Auction(_rewardAuction).receiver() == address(this),
+                "wrong receiver"
+            );
         }
         rewardAuction = _rewardAuction;
     }
 
-    function enableAuction(address _from, address _auction) external onlyEmergencyAuthorized {
-        require(_auction == auction || _auction == rewardAuction, "wrong auction");
+    function enableAuction(
+        address _from,
+        address _auction
+    ) external onlyEmergencyAuthorized {
+        require(
+            _auction == auction || _auction == rewardAuction,
+            "wrong auction"
+        );
         if (_auction == auction) {
             // asset to senior asset auction
             require(_from == address(asset), "wrong from");
-        } 
-        else {
+        } else {
             // reward auction
-            require(_from != address(asset) && _from != address(SENIOR_ASSET) && _from != address(SENIOR_VAULT), "wrong from");
+            require(
+                _from != address(asset) &&
+                    _from != address(SENIOR_ASSET) &&
+                    _from != address(SENIOR_VAULT),
+                "wrong from"
+            );
         }
         Auction(_auction).enable(_from);
     }
@@ -436,10 +470,9 @@ contract Yumbrella is TokenizedStaker {
      * @dev Set the asset to senior oracle address.
      * @param _assetToSeniorAssetOracle The address of the asset to senior asset oracle.
      */
-    function setAssetToSeniorAssetOracle(address _assetToSeniorAssetOracle)
-        external
-        onlyEmergencyAuthorized
-    {
+    function setAssetToSeniorAssetOracle(
+        address _assetToSeniorAssetOracle
+    ) external onlyEmergencyAuthorized {
         require(
             IOracle(_assetToSeniorAssetOracle).getRate() > 0,
             "invalid oracle"
@@ -451,10 +484,9 @@ contract Yumbrella is TokenizedStaker {
      * @dev Set the performance fee for the multi strategy vault.
      * @param _seniorVaultPerformanceFee The performance fee to charge the senior vault.
      */
-    function setSeniorVaultPerformanceFee(uint256 _seniorVaultPerformanceFee)
-        external
-        onlyManagement
-    {
+    function setSeniorVaultPerformanceFee(
+        uint256 _seniorVaultPerformanceFee
+    ) external onlyManagement {
         seniorVaultPerformanceFee = _seniorVaultPerformanceFee;
     }
 
@@ -470,10 +502,9 @@ contract Yumbrella is TokenizedStaker {
      * @dev Set the withdraw cooldown.
      * @param _withdrawCooldown The withdraw cooldown.
      */
-    function setWithdrawCooldown(uint256 _withdrawCooldown)
-        external
-        onlyManagement
-    {
+    function setWithdrawCooldown(
+        uint256 _withdrawCooldown
+    ) external onlyManagement {
         require(_withdrawCooldown < 365 days, "too long");
         withdrawCooldown = _withdrawCooldown;
     }
@@ -482,10 +513,9 @@ contract Yumbrella is TokenizedStaker {
      * @dev Set the withdraw window.
      * @param _withdrawWindow The withdraw window.
      */
-    function setWithdrawWindow(uint256 _withdrawWindow)
-        external
-        onlyManagement
-    {
+    function setWithdrawWindow(
+        uint256 _withdrawWindow
+    ) external onlyManagement {
         require(_withdrawWindow > 1 days, "too short");
         withdrawWindow = _withdrawWindow;
     }
@@ -494,10 +524,9 @@ contract Yumbrella is TokenizedStaker {
      * @dev Set the collateral ratio.
      * @param _collateralRatio The collateral ratio.
      */
-    function setCollateralRatio(uint256 _collateralRatio)
-        external
-        onlyManagement
-    {
+    function setCollateralRatio(
+        uint256 _collateralRatio
+    ) external onlyManagement {
         collateralRatio = _collateralRatio;
     }
 

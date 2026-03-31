@@ -44,29 +44,30 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
                 NEEDED TO BE OVERRIDDEN BY STRATEGIST
     //////////////////////////////////////////////////////////////*/
 
-
     // override the _freeFunds function to calculate the losses on morpho since last report.
     // dont update the storage of lastLostAssetsOnMorpho.
-    function _freeFunds(uint256 _amount) internal override {
-        // // calculate the losses on morpho since last report.
-        // (uint256 totalLoss, ) = _calculateLoss();
-        // uint256 actualTotalAssets;
-        // if (totalLoss > TokenizedStrategy.totalAssets()) {
-        //     actualTotalAssets = 0;
-        // }
-        // else {
-        //     actualTotalAssets = TokenizedStrategy.totalAssets() - totalLoss;
-        //     _amount = _amount * actualTotalAssets / TokenizedStrategy.totalAssets();
-        // }
+    // function _freeFunds(uint256 _amount) internal override {
+    //     // // calculate the losses on morpho since last report.
+    //     // (uint256 totalLoss, ) = _calculateLoss();
+    //     // uint256 actualTotalAssets;
+    //     // if (totalLoss > TokenizedStrategy.totalAssets()) {
+    //     //     actualTotalAssets = 0;
+    //     // }
+    //     // else {
+    //     //     actualTotalAssets = TokenizedStrategy.totalAssets() - totalLoss;
+    //     //     _amount = _amount * actualTotalAssets / TokenizedStrategy.totalAssets();
+    //     // }
 
-        // super._freeFunds(_amount);
-    }
+    //     // super._freeFunds(_amount);
+    // }
 
     function _harvestAndReport()
         internal
         override
         returns (uint256 _totalAssets)
     {
+        vault.deposit(0, address(this));
+
         // calculate the losses on morpho since last report.
         (uint256 newLosses, uint256 lostAssetsOnMorpho) = _calculateLoss();
         lastLostAssetsOnMorpho = lostAssetsOnMorpho;
@@ -76,15 +77,27 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
 
         if (fullBalance > lastMorphoLosses) {
             return fullBalance - lastMorphoLosses;
-        }
-        else {
+        } else {
             return 0;
         }
     }
 
-    function _calculateLoss() internal view returns (uint256 newLosses, uint256 lostAssetsOnMorpho) {
+    function lossExists() external view returns (bool) {
+        uint256 lostAssetsOnMorpho = IMetaMorpho(address(vault)).lostAssets();
+        if (lostAssetsOnMorpho > lastLostAssetsOnMorpho) return true;
+        return false;
+    }
+
+    function _calculateLoss()
+        internal
+        view
+        returns (uint256 newLosses, uint256 lostAssetsOnMorpho)
+    {
         lostAssetsOnMorpho = IMetaMorpho(address(vault)).lostAssets();
-        uint256 lostAssetsSinceLastReport = lostAssetsOnMorpho - lastLostAssetsOnMorpho;
-        newLosses = vault.balanceOf(address(this)) * lostAssetsSinceLastReport / vault.totalSupply();
+        uint256 lostAssetsSinceLastReport = lostAssetsOnMorpho -
+            lastLostAssetsOnMorpho;
+        newLosses =
+            (vault.balanceOf(address(this)) * lostAssetsSinceLastReport) /
+            vault.totalSupply();
     }
 }

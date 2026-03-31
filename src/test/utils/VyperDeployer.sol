@@ -31,14 +31,23 @@ contract VyperDeployer {
      * For example, the file name for "Token.vy" is "Token".
      * @return deployedAddress The address that the contract was deployed to.
      */
-    function deployContract(string memory path, string memory fileName)
-        public
-        returns (address)
-    {
+    function deployContract(
+        string memory path,
+        string memory fileName
+    ) public returns (address) {
         ///@notice create a list of strings with the commands necessary to compile Vyper contracts
-        string[] memory cmds = new string[](2);
-        cmds[0] = "vyper";
-        cmds[1] = string.concat(path, fileName, ".vy");
+        string[] memory cmds = new string[](3);
+        cmds[0] = "sh";
+        cmds[1] = "-c";
+        cmds[2] = string.concat(
+            "if [ -x .venv-vyper037-py39/bin/vyper ]; then .venv-vyper037-py39/bin/vyper ",
+            path,
+            fileName,
+            ".vy; else vyper ",
+            path,
+            fileName,
+            ".vy; fi"
+        );
 
         ///@notice compile the Vyper contract and return the bytecode
         bytes memory bytecode = cheatCodes.ffi(cmds);
@@ -74,9 +83,18 @@ contract VyperDeployer {
         bytes calldata args
     ) public returns (address) {
         ///@notice create a list of strings with the commands necessary to compile Vyper contracts
-        string[] memory cmds = new string[](2);
-        cmds[0] = "vyper";
-        cmds[1] = string.concat(path, fileName, ".vy");
+        string[] memory cmds = new string[](3);
+        cmds[0] = "sh";
+        cmds[1] = "-c";
+        cmds[2] = string.concat(
+            "if [ -x .venv-vyper037-py39/bin/vyper ]; then .venv-vyper037-py39/bin/vyper ",
+            path,
+            fileName,
+            ".vy; else vyper ",
+            path,
+            fileName,
+            ".vy; fi"
+        );
 
         ///@notice compile the Vyper contract and return the bytecode
         bytes memory _bytecode = cheatCodes.ffi(cmds);

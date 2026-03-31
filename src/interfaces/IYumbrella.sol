@@ -7,8 +7,11 @@ import {IWithdrawLimitModule} from "./IWithdrawLimitModule.sol";
 
 interface IYumbrella is IStrategy, IBaseHealthCheck, IWithdrawLimitModule {
     //TODO: Add your specific implementation interface in here.
-    function available_deposit_limit(address _receiver)
-        external
-        view
-        returns (uint256);
+    function available_deposit_limit(
+        address _receiver
+    ) external view returns (uint256);
+
+    function requestWithdraw(uint256 _amount) external;
+
+    function withdrawCooldown() external view returns (uint256);
 }

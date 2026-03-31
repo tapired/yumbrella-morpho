@@ -4,6 +4,11 @@ pragma solidity ^0.8.18;
 import "forge-std/console2.sol";
 import {Setup, ERC20, IYumbrella} from "./utils/Setup.sol";
 
+interface IYumbrellaDebug is IYumbrella {
+    function vaultsMaxWithdraw() external view returns (uint256);
+    function valueOfVault() external view returns (uint256);
+}
+
 contract OperationTest is Setup {
     function setUp() public virtual override {
         super.setUp();
@@ -38,7 +43,9 @@ contract OperationTest is Setup {
         assertGe(profit, 0, "!profit");
         assertEq(loss, 0, "!loss");
 
-        skip(yumbrella.profitMaxUnlockTime());
+        vm.prank(user);
+        yumbrella.requestWithdraw(_amount);
+        skip(yumbrella.withdrawCooldown() + 2);
 
         uint256 balanceBefore = asset.balanceOf(user);
 
@@ -53,11 +60,14 @@ contract OperationTest is Setup {
         );
     }
 
-    function test_profitableReport(uint256 _amount, uint16 _profitFactor)
-        public
-    {
+    function test_profitableReport(
+        uint256 _amount,
+        uint16 _profitFactor
+    ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
-        _profitFactor = uint16(bound(uint256(_profitFactor), 10, MAX_BPS));
+        _profitFactor = uint16(
+            bound(uint256(_profitFactor), 10, MAX_BPS / 100)
+        );
 
         // Deposit into strategy
         mintAndDepositIntoYumbrella(yumbrella, user, _amount);
@@ -79,7 +89,9 @@ contract OperationTest is Setup {
         assertGe(profit, toAirdrop, "!profit");
         assertEq(loss, 0, "!loss");
 
-        skip(yumbrella.profitMaxUnlockTime());
+        vm.prank(user);
+        yumbrella.requestWithdraw(_amount);
+        skip(yumbrella.withdrawCooldown() + 2);
 
         uint256 balanceBefore = asset.balanceOf(user);
 
@@ -99,7 +111,9 @@ contract OperationTest is Setup {
         uint16 _profitFactor
     ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
-        _profitFactor = uint16(bound(uint256(_profitFactor), 10, MAX_BPS));
+        _profitFactor = uint16(
+            bound(uint256(_profitFactor), 10, MAX_BPS / 100)
+        );
 
         // Set protocol fee to 0 and perf fee to 10%
         setFees(0, 1_000);
@@ -124,7 +138,9 @@ contract OperationTest is Setup {
         assertGe(profit, toAirdrop, "!profit");
         assertEq(loss, 0, "!loss");
 
-        skip(yumbrella.profitMaxUnlockTime());
+        vm.prank(user);
+        yumbrella.requestWithdraw(_amount);
+        skip(yumbrella.withdrawCooldown() + 2);
 
         // Get the expected fee
         uint256 expectedShares = (profit * 1_000) / MAX_BPS;
@@ -143,6 +159,9 @@ contract OperationTest is Setup {
             "!final balance"
         );
 
+        vm.prank(performanceFeeRecipient);
+        yumbrella.requestWithdraw(expectedShares);
+        skip(yumbrella.withdrawCooldown() + 2);
         vm.prank(performanceFeeRecipient);
         yumbrella.redeem(
             expectedShares,

@@ -3,23 +3,19 @@ pragma solidity ^0.8.18;
 
 import {IOracle} from "./interfaces/IOracle.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IVault} from "@yearn-vaults/interfaces/IVault.sol";
-import {IVaultFactory} from "@yearn-vaults/interfaces/IVaultFactory.sol";
-import {TokenizedStaker, ERC20, SafeERC20} from "@periphery/Bases/Staker/TokenizedStaker.sol";
 import {Auction} from "@periphery/Auctions/Auction.sol";
-import {IStrategy} from "@tokenized-strategy/interfaces/IStrategy.sol";
 import {IMorphoLossAwareCompounder} from "./interfaces/IMorphoLossAwareCompounder.sol";
-
-interface IValtCorrected {
-    function FACTORY() external view returns (address);
-}
+import {Base4626Compounder} from "@periphery/Bases/4626Compounder/Base4626Compounder.sol";
 
 interface IKeeper {
     function report(address _strategy) external returns (uint256, uint256);
 }
 
 /// @notice You can farm under my Yumbrella
-contract Yumbrella is TokenizedStaker {
+contract Yumbrella is Base4626Compounder {
     using SafeERC20 for ERC20;
 
     struct WithdrawRequest {
@@ -31,14 +27,9 @@ contract Yumbrella is TokenizedStaker {
 
     /// @notice The senior vault that will use Yumbrella as its accountant.
     IVault public immutable SENIOR_VAULT;
-    IStrategy public immutable vault; // yield vault
 
     /// @notice The underlying asset of the senior vault.
     ERC20 public immutable SENIOR_ASSET;
-
-    /// @notice The V3 vault factory that the senior vault belongs to.
-    IVaultFactory internal immutable VAULT_FACTORY =
-        IVaultFactory(0x770D0d1Fb036483Ed4AbB6d53c1C88fb277D812F);
 
     /// @notice The auction contract that will be used to sell the token for losses.
     address public auction;
@@ -74,57 +65,22 @@ contract Yumbrella is TokenizedStaker {
         address _seniorVault,
         address _assetToSeniorAssetOracle,
         address _yieldVault
-    ) TokenizedStaker(_asset, _name) {
+    ) Base4626Compounder(_asset, _name, _yieldVault) {
         SENIOR_VAULT = IVault(_seniorVault);
-        require(IStrategy(_yieldVault).asset() == _asset, "wrong vault");
-        vault = IStrategy(_yieldVault);
         SENIOR_ASSET = ERC20(SENIOR_VAULT.asset());
         // VAULT_FACTORY = IVaultFactory(IValtCorrected(_seniorVault).FACTORY());
         assetToSeniorAssetOracle = IOracle(_assetToSeniorAssetOracle);
-        asset.safeApprove(_yieldVault, type(uint256).max);
 
         seniorVaultPerformanceFee = 1_000;
         refundRatio = 10_000;
         collateralRatio = 10e18; // 10x
         withdrawCooldown = 7 days;
         withdrawWindow = 7 days;
-
-        _addReward(_seniorVault, msg.sender, 1 weeks);
     }
 
     /*//////////////////////////////////////////////////////////////
                 NEEDED TO BE OVERRIDDEN BY STRATEGIST
     //////////////////////////////////////////////////////////////*/
-
-    function _deployFunds(uint256 _amount) internal override {
-        vault.deposit(_amount, address(this));
-        _stake();
-    }
-
-    function _freeFunds(uint256 _amount) internal override {
-        uint256 shares = vault.previewWithdraw(_amount);
-        uint256 vaultBalance = balanceOfVault();
-        if (shares > vaultBalance) {
-            unchecked {
-                _unStake(shares - vaultBalance);
-            }
-            shares = Math.min(shares, balanceOfVault());
-        }
-
-        vault.redeem(shares, address(this), address(this));
-    }
-
-    function _postWithdrawHook(
-        uint256 assets,
-        uint256 shares,
-        address receiver,
-        address owner,
-        uint256 maxLoss
-    ) internal virtual override {
-        // Fully reset the withdraw request.
-        delete withdrawRequests[owner];
-        super._postWithdrawHook(assets, shares, receiver, owner, maxLoss);
-    }
 
     /*//////////////////////////////////////////////////////////////
                     VAULT CALLBACK FUNCTIONS
@@ -142,7 +98,7 @@ contract Yumbrella is TokenizedStaker {
 
     // Don't allow withdraws if any of the strategies have unrealised losses.
     function available_withdraw_limit(
-        address _owner,
+        address,
         uint256 /* _maxLoss */,
         address[] calldata _strategies
     ) external view returns (uint256) {
@@ -164,8 +120,7 @@ contract Yumbrella is TokenizedStaker {
             }
         }
 
-        // but we also need to check if there are losses on the vaults strategies
-        // that are not reported by "harvestAndReport" on the strategy level.
+        return type(uint256).max;
     }
 
     function report(
@@ -177,15 +132,6 @@ contract Yumbrella is TokenizedStaker {
 
         if (_gain > 0) {
             _fees = (_gain * seniorVaultPerformanceFee) / MAX_BPS;
-            (uint16 protocolFee, ) = VAULT_FACTORY.protocol_fee_config(
-                address(SENIOR_VAULT)
-            );
-            uint256 sharesToEarn = SENIOR_VAULT.convertToShares(_fees);
-            uint256 protocolShares = (sharesToEarn * protocolFee) / MAX_BPS;
-            _notifyRewardAmount(
-                address(SENIOR_VAULT),
-                sharesToEarn - protocolShares
-            );
         } else {
             // Check if the auction was kicked and filled.
             if (auction != address(0)) {
@@ -201,47 +147,6 @@ contract Yumbrella is TokenizedStaker {
             _freeFunds(_refunds);
             SENIOR_ASSET.forceApprove(address(SENIOR_VAULT), _refunds);
         }
-    }
-
-    function _harvestAndReport()
-        internal
-        override
-        returns (uint256 _totalAssets)
-    {
-        _claimAndSellRewards();
-        _totalAssets = balanceOfAsset() + valueOfVault();
-    }
-
-    function _stake() internal virtual {}
-
-    function _unStake(uint256 _amount) internal virtual {}
-
-    function _claimAndSellRewards() internal virtual {}
-
-    function balanceOfAsset() public view returns (uint256) {
-        return asset.balanceOf(address(this));
-    }
-
-    function balanceOfVault() public view returns (uint256) {
-        return vault.balanceOf(address(this));
-    }
-
-    function balanceOfStake() public view returns (uint256) {
-        return 0;
-    }
-
-    function valueOfVault() public view returns (uint256) {
-        return vault.convertToAssets(balanceOfVault() + balanceOfStake());
-    }
-
-    function vaultsMaxWithdraw() public view returns (uint256) {
-        return vault.convertToAssets(vault.maxRedeem(address(this)));
-    }
-
-    function availableDepositLimit(
-        address
-    ) public view override returns (uint256) {
-        return vault.maxDeposit(address(this));
     }
 
     /**
@@ -355,10 +260,17 @@ contract Yumbrella is TokenizedStaker {
      */
     function _tend(uint256 /* _totalIdle */) internal override {
         uint256 _loss;
+        bool _lossExistsOnCompounder;
         address[] memory strategies = SENIOR_VAULT.get_default_queue();
         for (uint256 i = 0; i < strategies.length; i++) {
             uint256 debt = SENIOR_VAULT.strategies(strategies[i]).current_debt;
             if (debt > 0) {
+                if (!_lossExistsOnCompounder) {
+                    _lossExistsOnCompounder = IMorphoLossAwareCompounder(
+                        strategies[i]
+                    ).lossExists();
+                }
+
                 _loss += SENIOR_VAULT.assess_share_of_unrealised_losses(
                     strategies[i],
                     debt
@@ -366,7 +278,8 @@ contract Yumbrella is TokenizedStaker {
             }
         }
 
-        if (_loss > 0) {
+        // if there are losses on strategies they need to be reported first.
+        if (_loss > 0 && !_lossExistsOnCompounder) {
             if (auction != address(0)) {
                 uint256 toAuction = Math.min(
                     _fromSeniorAssetToAsset((_loss * refundRatio) / MAX_BPS),
@@ -376,9 +289,28 @@ contract Yumbrella is TokenizedStaker {
                 _freeFunds(toAuction);
                 asset.safeTransfer(address(auction), toAuction);
                 Auction(auction).kick(address(asset));
-                // Eat the loss.
-                IKeeper(TokenizedStrategy.keeper()).report(address(this));
             }
+            // Eat the loss.
+            IKeeper(TokenizedStrategy.keeper()).report(address(this));
+        }
+    }
+
+    function _harvestAndReport()
+        internal
+        virtual
+        override
+        returns (uint256 _totalAssets)
+    {
+        _totalAssets = super._harvestAndReport();
+
+        uint256 seniorVaultShares = SENIOR_VAULT.balanceOf(address(this));
+        if (seniorVaultShares > 0) {
+            uint256 redeemed = SENIOR_VAULT.redeem(
+                seniorVaultShares,
+                address(this),
+                address(this)
+            );
+            _totalAssets += redeemed;
         }
     }
 
@@ -390,9 +322,15 @@ contract Yumbrella is TokenizedStaker {
      */
     function _tendTrigger() internal view override returns (bool) {
         address[] memory strategies = SENIOR_VAULT.get_default_queue();
+        bool _lossExists;
         for (uint256 i = 0; i < strategies.length; i++) {
             uint256 debt = SENIOR_VAULT.strategies(strategies[i]).current_debt;
             if (debt > 0) {
+                _lossExists = IMorphoLossAwareCompounder(strategies[i])
+                    .lossExists();
+                if (_lossExists) {
+                    return false;
+                }
                 if (
                     SENIOR_VAULT.assess_share_of_unrealised_losses(
                         strategies[i],
@@ -533,86 +471,5 @@ contract Yumbrella is TokenizedStaker {
 
     function _emergencyWithdraw(uint256 _amount) internal override {
         _freeFunds(Math.min(_amount, vaultsMaxWithdraw()));
-    }
-
-    // Tokenized staker override
-    function _notifyRewardAmount(
-        address _rewardToken,
-        uint256 _rewardAmount
-    ) internal override updateReward(address(0)) {
-        Reward memory _rewardData = rewardData[_rewardToken];
-        require(_rewardAmount > 0 && _rewardAmount < 1e30, "bad reward value");
-
-        // If total supply is 0, send tokens to management instead of reverting.
-        // Prevent footguns if _notifyRewardInstant() is part of predeposit hooks.
-        uint256 totalSupply = _totalSupply();
-        if (totalSupply == 0) {
-            address management = TokenizedStrategy.management();
-
-            ERC20(_rewardToken).safeTransfer(management, _rewardAmount);
-            emit NotifiedWithZeroSupply(_rewardToken, _rewardAmount);
-            return;
-        }
-
-        // this is the only part of the struct that will be the same for instant or normal
-        _rewardData.lastUpdateTime = uint96(block.timestamp);
-
-        /// @dev A rewardsDuration of 1 dictates instant release of rewards
-        if (_rewardData.rewardsDuration == 1) {
-            // Update lastNotifyTime and lastRewardRate if needed (would revert if in the same block otherwise)
-            if (uint96(block.timestamp) != _rewardData.lastNotifyTime) {
-                _rewardData.lastRewardRate = uint128(
-                    _rewardAmount /
-                        (block.timestamp - _rewardData.lastNotifyTime)
-                );
-                _rewardData.lastNotifyTime = uint96(block.timestamp);
-            }
-
-            // Update rewardRate, lastUpdateTime, periodFinish
-            _rewardData.rewardRate = 0;
-            _rewardData.periodFinish = uint96(block.timestamp);
-
-            // Instantly release rewards by modifying rewardPerTokenStored
-            _rewardData.rewardPerTokenStored = uint128(
-                _rewardData.rewardPerTokenStored +
-                    (_rewardAmount * PRECISION) /
-                    totalSupply
-            );
-        } else {
-            // store current rewardRate
-            _rewardData.lastRewardRate = _rewardData.rewardRate;
-            _rewardData.lastNotifyTime = uint96(block.timestamp);
-
-            // update our rewardData with our new rewardRate
-            if (block.timestamp >= _rewardData.periodFinish) {
-                _rewardData.rewardRate = uint128(
-                    _rewardAmount / _rewardData.rewardsDuration
-                );
-            } else {
-                _rewardData.rewardRate = uint128(
-                    (_rewardAmount +
-                        (_rewardData.periodFinish - block.timestamp) *
-                        _rewardData.rewardRate) / _rewardData.rewardsDuration
-                );
-            }
-
-            // update time-based struct fields
-            _rewardData.periodFinish = uint96(
-                block.timestamp + _rewardData.rewardsDuration
-            );
-        }
-
-        // make sure we have enough reward token for our new rewardRate
-        // NOTE: This must need to be commented because report mints the shares after the report call.
-        // require(
-        //     _rewardData.rewardRate <=
-        //         (ERC20(_rewardToken).balanceOf(address(this)) /
-        //             _rewardData.rewardsDuration),
-        //     "Not enough balance"
-        // );
-
-        // write to storage
-        rewardData[_rewardToken] = _rewardData;
-        emit RewardAdded(_rewardToken, _rewardAmount);
     }
 }

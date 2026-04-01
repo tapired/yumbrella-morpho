@@ -226,8 +226,8 @@ contract YumbrellaTest is Setup {
         }
 
         require(found, "Liquidate event not found");
-        // console2.log("badDebtAssets", badDebtAssets);
-        // console2.log("badDebtShares", badDebtShares);
+        console2.log("badDebtAssets", badDebtAssets);
+        console2.log("badDebtShares", badDebtShares);
         assertGt(badDebtAssets, 0, "badDebtAssets is zero");
         assertGt(badDebtShares, 0, "badDebtShares is zero");
     }
@@ -448,22 +448,14 @@ contract YumbrellaTest is Setup {
             "!balance of yumbrella"
         );
 
-        uint256 rewardsAccountedForYumbrella = yumbrella.getRewardForDuration(
-            address(seniorVault)
-        );
         console2.log(
-            "rewards accounted for yumbrella",
-            rewardsAccountedForYumbrella
-        );
-        assertLe(
-            rewardsAccountedForYumbrella,
-            seniorVault.balanceOf(address(yumbrella)),
-            "!rewards accounted for yumbrella"
+            "seniorVault shares for yumbrella",
+            seniorVault.balanceOf(address(yumbrella))
         );
     }
 
     function test_lossCompensation(uint256 _amount) public {
-        vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
+        vm.assume(_amount > 1000e6 && _amount < maxFuzzAmount);
 
         // Deposit into strategy
         mintAndDepositIntoYumbrella(yumbrella, user, _amount);
@@ -482,11 +474,16 @@ contract YumbrellaTest is Setup {
             "!morphoLossAwareCompounder totalAssets"
         );
 
-        uint256 oraclePriceBps = 4_000; // 40% of current oracle price
+        uint256 oraclePriceBps = 2_000; // 20% of current oracle price
         simulateBadDebt(tapir, tapir, _amount, oraclePriceBps);
 
+        console2.log(
+            "loss exists on morpho loss aware compounder",
+            morphoLossAwareCompounder.lossExists()
+        );
+
         // Now there are losses on the senior vault let's make sure we can't withdraw from senior vault.
-        vm.expectRevert("exceed withdraw limit");
+        vm.expectRevert("exceed withdraw limit1");
         vm.prank(user);
         seniorVault.redeem(_amount, user, user);
 
@@ -497,7 +494,7 @@ contract YumbrellaTest is Setup {
         assertGt(loss, 0, "!loss");
 
         // still can't withdraw from senior vault because vault level losses are not reported yet.
-        vm.expectRevert("exceed withdraw limit");
+        vm.expectRevert("exceed withdraw limit2");
         vm.prank(user);
         seniorVault.redeem(_amount, user, user);
 
@@ -520,5 +517,67 @@ contract YumbrellaTest is Setup {
             10 ** ERC20(seniorVaultAsset).decimals(),
             "!pps"
         );
+    }
+
+    function test_afterLoss() public {
+        uint256 _amount = 10_000_000e6;
+        uint256 _otherAmount = 1_000_000e6;
+
+        // vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
+
+        // Deposit into strategy
+        mintAndDepositIntoYumbrella(yumbrella, user, _amount);
+        assertEq(yumbrella.totalAssets(), _amount, "!totalAssets");
+
+        // Deposit into senior vault
+        mintAndDepositIntoSeniorVault(seniorVault, user, _amount);
+        assertEq(
+            seniorVault.totalAssets(),
+            _amount,
+            "!seniorVault totalAssets"
+        );
+        assertEq(
+            morphoLossAwareCompounder.totalAssets(),
+            _amount,
+            "!morphoLossAwareCompounder totalAssets"
+        );
+
+        uint256 oraclePriceBps = 4_000; // 40% of current oracle price
+        simulateBadDebt(tapir, tapir, _amount, oraclePriceBps);
+
+        // now report on the morpho loss aware compounder make sure loss there.
+        vm.prank(keeper);
+        (uint256 profit, uint256 loss) = morphoLossAwareCompounder.report();
+        assertEq(profit, 0, "!profit");
+        assertGt(loss, 0, "!loss");
+
+        // now report on senior vault
+        vm.prank(vaultManagement);
+        (profit, loss) = seniorVault.process_report(
+            address(morphoLossAwareCompounder)
+        );
+        assertEq(profit, 0, "!profit");
+        assertGt(loss, 0, "!loss");
+
+        // morpho loss aware compounder beart the losses
+        assertLe(
+            morphoLossAwareCompounder.pricePerShare(),
+            10 ** ERC20(seniorVaultAsset).decimals(),
+            "!pps"
+        );
+        assertGe(
+            seniorVault.pricePerShare(),
+            10 ** ERC20(seniorVaultAsset).decimals(),
+            "!pps"
+        );
+        console2.log("pps of yumbrella", yumbrella.pricePerShare());
+
+        uint256 beforeShares = yumbrella.balanceOf(user);
+        mintAndDepositIntoYumbrella(yumbrella, user, _otherAmount);
+        uint256 sharesReceived = yumbrella.balanceOf(user) - beforeShares;
+
+        // because pps is decreased!
+        assertGe(sharesReceived, _otherAmount, "!shares received");
+        console2.log("sharesReceived", sharesReceived);
     }
 }

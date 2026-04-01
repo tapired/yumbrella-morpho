@@ -404,9 +404,66 @@ contract YumbrellaTest is Setup {
         );
     }
 
-    function test_lossCompensation() public {
-        uint _amount = 10_000_000e6;
-        // vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
+    function test_profits(uint256 _amount) public {
+        vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
+
+        // Deposit into strategy
+        mintAndDepositIntoYumbrella(yumbrella, user, _amount);
+        assertEq(yumbrella.totalAssets(), _amount, "!totalAssets");
+
+        // Deposit into senior vault
+        mintAndDepositIntoSeniorVault(seniorVault, user, _amount);
+        assertEq(
+            seniorVault.totalAssets(),
+            _amount,
+            "!seniorVault totalAssets"
+        );
+        // All in morpho loss aware compounder by default
+        assertEq(
+            morphoLossAwareCompounder.totalAssets(),
+            _amount,
+            "!morphoLossAwareCompounder totalAssets"
+        );
+
+        skip(2 days); // simulate interest earnings
+
+        vm.prank(keeper);
+        (uint256 profit, uint256 loss) = morphoLossAwareCompounder.report();
+        assertGe(profit, 0, "!profit");
+        assertEq(loss, 0, "!loss");
+        console2.log("profit", profit);
+
+        skip(morphoLossAwareCompounder.profitMaxUnlockTime());
+
+        vm.prank(vaultManagement);
+        (profit, loss) = seniorVault.process_report(
+            address(morphoLossAwareCompounder)
+        );
+        assertGe(profit, 0, "!profit");
+        assertEq(loss, 0, "!loss");
+        console2.log("profit", profit);
+
+        assertTrue(
+            seniorVault.balanceOf(address(yumbrella)) != 0,
+            "!balance of yumbrella"
+        );
+
+        uint256 rewardsAccountedForYumbrella = yumbrella.getRewardForDuration(
+            address(seniorVault)
+        );
+        console2.log(
+            "rewards accounted for yumbrella",
+            rewardsAccountedForYumbrella
+        );
+        assertLe(
+            rewardsAccountedForYumbrella,
+            seniorVault.balanceOf(address(yumbrella)),
+            "!rewards accounted for yumbrella"
+        );
+    }
+
+    function test_lossCompensation(uint256 _amount) public {
+        vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
 
         // Deposit into strategy
         mintAndDepositIntoYumbrella(yumbrella, user, _amount);

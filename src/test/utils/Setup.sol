@@ -11,6 +11,7 @@ import {IMorphoLossAwareCompounder} from "../../interfaces/IMorphoLossAwareCompo
 import {MorphoLossAwareCompounderFactory} from "../../MorphoLossAwareCompounderFactory.sol";
 import {YumbrellaFactory} from "../../YumbrellaFactory.sol";
 import {IYumbrella} from "../../interfaces/IYumbrella.sol";
+import {IVaultFactory} from "@yearn-vaults/interfaces/IVaultFactory.sol";
 
 import {MockOracle} from "../Mocks/MockOracle.sol";
 import {Clonable} from "@periphery/utils/Clonable.sol";
@@ -36,6 +37,8 @@ contract Setup is ExtendedTest, IEvents, Clonable {
     YumbrellaFactory public yumbrellaFactory;
     MorphoLossAwareCompounderFactory public morphoLossAwareCompounderFactory;
     IMorphoLossAwareCompounder public morphoLossAwareCompounder;
+    IVaultFactory public vaultFactory =
+        IVaultFactory(0x770D0d1Fb036483Ed4AbB6d53c1C88fb277D812F);
 
     IVault public seniorVault;
     ERC20 public seniorVaultAsset;
@@ -142,16 +145,7 @@ contract Setup is ExtendedTest, IEvents, Clonable {
     }
 
     function setUpVault() public returns (IVault) {
-        if (original == address(0)) {
-            original = vyperDeployer.deployContract(
-                "lib/yearn-vaults-v3/contracts/",
-                "VaultV3"
-            );
-        }
-
-        IVault _vault = IVault(_clone());
-
-        _vault.initialize(
+        address _vault = vaultFactory.deploy_new_vault(
             address(seniorVaultAsset),
             "Test vault",
             "tsVault",
@@ -161,12 +155,12 @@ contract Setup is ExtendedTest, IEvents, Clonable {
 
         vm.prank(management);
         // Give the vault manager all the roles
-        _vault.set_role(vaultManagement, Roles.ALL);
+        IVault(_vault).set_role(vaultManagement, Roles.ALL);
 
         vm.prank(vaultManagement);
-        _vault.set_deposit_limit(type(uint256).max);
+        IVault(_vault).set_deposit_limit(type(uint256).max);
 
-        return _vault;
+        return IVault(_vault);
     }
 
     function setUpYumbrella(

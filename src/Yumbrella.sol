@@ -37,7 +37,8 @@ contract Yumbrella is TokenizedStaker {
     ERC20 public immutable SENIOR_ASSET;
 
     /// @notice The V3 vault factory that the senior vault belongs to.
-    IVaultFactory internal immutable VAULT_FACTORY;
+    IVaultFactory internal immutable VAULT_FACTORY =
+        IVaultFactory(0x770D0d1Fb036483Ed4AbB6d53c1C88fb277D812F);
 
     /// @notice The auction contract that will be used to sell the token for losses.
     address public auction;
@@ -78,7 +79,7 @@ contract Yumbrella is TokenizedStaker {
         require(IStrategy(_yieldVault).asset() == _asset, "wrong vault");
         vault = IStrategy(_yieldVault);
         SENIOR_ASSET = ERC20(SENIOR_VAULT.asset());
-        VAULT_FACTORY = IVaultFactory(IValtCorrected(_seniorVault).FACTORY());
+        // VAULT_FACTORY = IVaultFactory(IValtCorrected(_seniorVault).FACTORY());
         assetToSeniorAssetOracle = IOracle(_assetToSeniorAssetOracle);
         asset.safeApprove(_yieldVault, type(uint256).max);
 
@@ -532,5 +533,86 @@ contract Yumbrella is TokenizedStaker {
 
     function _emergencyWithdraw(uint256 _amount) internal override {
         _freeFunds(Math.min(_amount, vaultsMaxWithdraw()));
+    }
+
+    // Tokenized staker override
+    function _notifyRewardAmount(
+        address _rewardToken,
+        uint256 _rewardAmount
+    ) internal override updateReward(address(0)) {
+        Reward memory _rewardData = rewardData[_rewardToken];
+        require(_rewardAmount > 0 && _rewardAmount < 1e30, "bad reward value");
+
+        // If total supply is 0, send tokens to management instead of reverting.
+        // Prevent footguns if _notifyRewardInstant() is part of predeposit hooks.
+        uint256 totalSupply = _totalSupply();
+        if (totalSupply == 0) {
+            address management = TokenizedStrategy.management();
+
+            ERC20(_rewardToken).safeTransfer(management, _rewardAmount);
+            emit NotifiedWithZeroSupply(_rewardToken, _rewardAmount);
+            return;
+        }
+
+        // this is the only part of the struct that will be the same for instant or normal
+        _rewardData.lastUpdateTime = uint96(block.timestamp);
+
+        /// @dev A rewardsDuration of 1 dictates instant release of rewards
+        if (_rewardData.rewardsDuration == 1) {
+            // Update lastNotifyTime and lastRewardRate if needed (would revert if in the same block otherwise)
+            if (uint96(block.timestamp) != _rewardData.lastNotifyTime) {
+                _rewardData.lastRewardRate = uint128(
+                    _rewardAmount /
+                        (block.timestamp - _rewardData.lastNotifyTime)
+                );
+                _rewardData.lastNotifyTime = uint96(block.timestamp);
+            }
+
+            // Update rewardRate, lastUpdateTime, periodFinish
+            _rewardData.rewardRate = 0;
+            _rewardData.periodFinish = uint96(block.timestamp);
+
+            // Instantly release rewards by modifying rewardPerTokenStored
+            _rewardData.rewardPerTokenStored = uint128(
+                _rewardData.rewardPerTokenStored +
+                    (_rewardAmount * PRECISION) /
+                    totalSupply
+            );
+        } else {
+            // store current rewardRate
+            _rewardData.lastRewardRate = _rewardData.rewardRate;
+            _rewardData.lastNotifyTime = uint96(block.timestamp);
+
+            // update our rewardData with our new rewardRate
+            if (block.timestamp >= _rewardData.periodFinish) {
+                _rewardData.rewardRate = uint128(
+                    _rewardAmount / _rewardData.rewardsDuration
+                );
+            } else {
+                _rewardData.rewardRate = uint128(
+                    (_rewardAmount +
+                        (_rewardData.periodFinish - block.timestamp) *
+                        _rewardData.rewardRate) / _rewardData.rewardsDuration
+                );
+            }
+
+            // update time-based struct fields
+            _rewardData.periodFinish = uint96(
+                block.timestamp + _rewardData.rewardsDuration
+            );
+        }
+
+        // make sure we have enough reward token for our new rewardRate
+        // NOTE: This must need to be commented because report mints the shares after the report call.
+        // require(
+        //     _rewardData.rewardRate <=
+        //         (ERC20(_rewardToken).balanceOf(address(this)) /
+        //             _rewardData.rewardsDuration),
+        //     "Not enough balance"
+        // );
+
+        // write to storage
+        rewardData[_rewardToken] = _rewardData;
+        emit RewardAdded(_rewardToken, _rewardAmount);
     }
 }

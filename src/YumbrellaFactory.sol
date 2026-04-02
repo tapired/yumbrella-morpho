@@ -12,6 +12,7 @@ contract YumbrellaFactory {
     address public management;
     address public performanceFeeRecipient;
     address public keeper;
+    uint256 public yumbrellaLossLimitRatio = 9_999;
 
     /// @notice Track the deployments. asset => pool => yumbrella
     mapping(address => address) public deployments;
@@ -61,6 +62,8 @@ contract YumbrellaFactory {
 
         _newYumbrella.setEmergencyAdmin(emergencyAdmin);
 
+        _newYumbrella.setLossLimitRatio(yumbrellaLossLimitRatio);
+
         emit NewYumbrella(address(_newYumbrella), _asset);
 
         deployments[_asset] = address(_newYumbrella);
@@ -76,6 +79,12 @@ contract YumbrellaFactory {
         management = _management;
         performanceFeeRecipient = _performanceFeeRecipient;
         keeper = _keeper;
+    }
+
+    function setYumbrellaLossLimitRatio(uint256 _newLossLimitRatio) external {
+        require(msg.sender == management, "!management");
+        require(_newLossLimitRatio < 10_000, "!loss limit");
+        yumbrellaLossLimitRatio = _newLossLimitRatio;
     }
 
     function isDeployedStrategy(

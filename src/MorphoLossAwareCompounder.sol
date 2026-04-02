@@ -31,6 +31,8 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
     uint256 public lastLostAssetsOnMorpho;
     uint256 public lastMorphoLosses;
 
+    mapping(address => bool) public allowed;
+
     constructor(
         address _asset,
         string memory _name,
@@ -99,5 +101,16 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
         newLosses =
             (vault.balanceOf(address(this)) * lostAssetsSinceLastReport) /
             vault.totalSupply();
+    }
+
+    function availableDepositLimit(
+        address _owner
+    ) public view override returns (uint256) {
+        if (allowed[_owner]) return super.availableDepositLimit(_owner);
+        return 0;
+    }
+
+    function setAllowed(address _owner, bool _allowed) public onlyManagement {
+        allowed[_owner] = _allowed;
     }
 }

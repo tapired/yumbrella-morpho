@@ -59,6 +59,9 @@ contract Yumbrella is Base4626Compounder {
     /// @notice The withdraw requests of users.
     mapping(address => WithdrawRequest) public withdrawRequests;
 
+    /// @notice Flag to block interactions until next strategy report sync.
+    bool public pendingLossSync;
+
     constructor(
         address _asset,
         string memory _name,
@@ -102,20 +105,27 @@ contract Yumbrella is Base4626Compounder {
         uint256 /* _maxLoss */,
         address[] calldata _strategies
     ) external view returns (uint256) {
+        address[] memory strategies;
+        if (SENIOR_VAULT.use_default_queue() || _strategies.length == 0) {
+            strategies = SENIOR_VAULT.get_default_queue();
+        } else {
+            strategies = _strategies;
+        }
+
         // This check is basically ensures that if there is a loss on the senior vault strategies
         // that are reported by "harvestAndReport" on the strategy level but not yet realized on the vault level.
-        for (uint256 i = 0; i < _strategies.length; i++) {
-            uint256 debt = SENIOR_VAULT.strategies(_strategies[i]).current_debt;
+        for (uint256 i = 0; i < strategies.length; i++) {
+            uint256 debt = SENIOR_VAULT.strategies(strategies[i]).current_debt;
             if (debt > 0) {
                 if (
                     SENIOR_VAULT.assess_share_of_unrealised_losses(
-                        _strategies[i],
+                        strategies[i],
                         debt
                     ) !=
                     0 ||
                     // but we also need to check if there are losses on the vaults strategies
                     // that are not reported by "harvestAndReport" on the strategy level.
-                    IMorphoLossAwareCompounder(_strategies[i]).lossExists()
+                    IMorphoLossAwareCompounder(strategies[i]).lossExists()
                 ) return 0;
             }
         }
@@ -144,8 +154,15 @@ contract Yumbrella is Base4626Compounder {
                 (_loss * refundRatio) / MAX_BPS,
                 valueOfVault()
             );
-            _freeFunds(_refunds);
+            uint256 idleSeniorVaultAssetBalance = SENIOR_ASSET.balanceOf(
+                address(this)
+            );
+            if (_refunds > idleSeniorVaultAssetBalance) {
+                _freeFunds(_refunds - idleSeniorVaultAssetBalance);
+            }
             SENIOR_ASSET.forceApprove(address(SENIOR_VAULT), _refunds);
+            // Block deposits/withdrawals until keeper performs the next report sync.
+            pendingLossSync = true;
         }
     }
 
@@ -204,6 +221,8 @@ contract Yumbrella is Base4626Compounder {
     function availableWithdrawLimit(
         address _owner
     ) public view override returns (uint256) {
+        if (pendingLossSync) return 0;
+
         WithdrawRequest memory request = withdrawRequests[_owner];
         if (
             // If the cooldown period has passed
@@ -221,6 +240,13 @@ contract Yumbrella is Base4626Compounder {
                 );
         }
         return 0;
+    }
+
+    function availableDepositLimit(
+        address _owner
+    ) public view override returns (uint256) {
+        if (pendingLossSync) return 0;
+        return super.availableDepositLimit(_owner);
     }
 
     // NOTE: This means users continue to earn rewards while unlocked but also can get slashed.
@@ -291,7 +317,7 @@ contract Yumbrella is Base4626Compounder {
                 Auction(auction).kick(address(asset));
             }
             // Eat the loss.
-            IKeeper(TokenizedStrategy.keeper()).report(address(this));
+            TokenizedStrategy.report();
         }
     }
 
@@ -301,22 +327,24 @@ contract Yumbrella is Base4626Compounder {
         override
         returns (uint256 _totalAssets)
     {
-        _totalAssets = super._harvestAndReport();
-
         uint256 seniorVaultShares = SENIOR_VAULT.balanceOf(address(this));
         if (seniorVaultShares > 0) {
-            uint256 redeemed = SENIOR_VAULT.redeem(
+            SENIOR_VAULT.redeem(
                 seniorVaultShares,
                 address(this),
                 address(this)
             );
-            _totalAssets += redeemed;
         }
+
+        _totalAssets = super._harvestAndReport();
+        pendingLossSync = false;
     }
 
-    // just in case if the amount of senior vault shares is not redeemable in harvest 
-    function manualRedeemSeniorVaultShares(uint256 _amount) external onlyManagement {
-        if(_amount == type(uint256).max) {
+    // just in case if the amount of senior vault shares is not redeemable in harvest
+    function manualRedeemSeniorVaultShares(
+        uint256 _amount
+    ) external onlyManagement {
+        if (_amount == type(uint256).max) {
             _amount = SENIOR_VAULT.balanceOf(address(this));
         }
         SENIOR_VAULT.redeem(_amount, address(this), address(this));

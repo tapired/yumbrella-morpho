@@ -160,6 +160,9 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         vm.prank(vaultManagement);
         IVault(_vault).set_deposit_limit(type(uint256).max);
 
+        vm.prank(management);
+        morphoLossAwareCompounder.setAllowed(_vault, true);
+
         return IVault(_vault);
     }
 

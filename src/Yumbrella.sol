@@ -314,6 +314,14 @@ contract Yumbrella is Base4626Compounder {
         }
     }
 
+    // just in case if the amount of senior vault shares is not redeemable in harvest 
+    function manualRedeemSeniorVaultShares(uint256 _amount) external onlyManagement {
+        if(_amount == type(uint256).max) {
+            _amount = SENIOR_VAULT.balanceOf(address(this));
+        }
+        SENIOR_VAULT.redeem(_amount, address(this), address(this));
+    }
+
     /**
      * @dev Optional trigger to override if tend() will be used by the strategy.
      * This must be implemented if the strategy hopes to invoke _tend().

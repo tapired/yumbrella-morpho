@@ -4,6 +4,7 @@ pragma solidity ^0.8.18;
 import {BaseStrategy, ERC20} from "@tokenized-strategy/BaseStrategy.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {MorphoCompounder} from "./MorphoCompounder.sol";
+import {MinimalMorphoExpectedSupplyLib, IMorphoLike, MarketParams} from "./lib/MinimalMorphoExpectedSupplyLib.sol";
 
 // Import interfaces for many popular DeFi projects, or add your own!
 //import "../interfaces/<protocol>/<Interface>.sol";
@@ -23,10 +24,15 @@ import {MorphoCompounder} from "./MorphoCompounder.sol";
 
 interface IMetaMorpho {
     function lostAssets() external view returns (uint256);
+    function MORPHO() external view returns (IMorphoLike);
+    function withdrawQueueLength() external view returns (uint256);
+    function withdrawQueue(uint256 i) external view returns (bytes32);
+    function lastTotalAssets() external view returns (uint256);
 }
 
 contract MorphoLossAwareCompounder is MorphoCompounder {
     using SafeERC20 for ERC20;
+    using MinimalMorphoExpectedSupplyLib for IMorphoLike;
 
     uint256 public lastLostAssetsOnMorpho;
     uint256 public lastMorphoLosses;
@@ -86,8 +92,39 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
 
     function lossExists() external view returns (bool) {
         uint256 lostAssetsOnMorpho = IMetaMorpho(address(vault)).lostAssets();
-        if (lostAssetsOnMorpho > lastLostAssetsOnMorpho) return true;
-        return false;
+        if (lostAssetsOnMorpho > lastLostAssetsOnMorpho) return true; // already accrued, early exit
+        return viewPendingLostAssets() > lostAssetsOnMorpho;
+    }
+
+    function viewPendingLostAssets() public view returns (uint256) {
+        IMetaMorpho morphoVault = IMetaMorpho(address(vault));
+        IMorphoLike morpho = morphoVault.MORPHO();
+
+        uint256 realTotalAssets;
+        uint256 length = morphoVault.withdrawQueueLength();
+
+        for (uint256 i; i < length; ++i) {
+            bytes32 id = morphoVault.withdrawQueue(i);
+            MarketParams memory marketParams = morpho.idToMarketParams(id);
+
+            realTotalAssets += MinimalMorphoExpectedSupplyLib
+                .expectedSupplyAssets(
+                    morpho,
+                    marketParams,
+                    address(morphoVault)
+                );
+        }
+
+        uint256 last = morphoVault.lastTotalAssets();
+        uint256 lost = morphoVault.lostAssets();
+
+        uint256 accountedRealAssets = last - lost;
+
+        if (realTotalAssets < accountedRealAssets) {
+            return last - realTotalAssets;
+        } else {
+            return lost;
+        }
     }
 
     function _calculateLoss()

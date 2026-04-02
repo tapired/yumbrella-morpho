@@ -610,7 +610,7 @@ contract YumbrellaTest is Setup {
         uint256 morphoPps = morphoLossAwareCompounder.pricePerShare();
         uint256 seniorPps = seniorVault.pricePerShare();
         uint256 yumbrellaPps = yumbrella.pricePerShare();
-  
+
         uint256 beforeShares = yumbrella.balanceOf(user);
         mintAndDepositIntoYumbrella(yumbrella, user, _otherAmount);
         uint256 sharesReceived = yumbrella.balanceOf(user) - beforeShares;
@@ -651,7 +651,7 @@ contract YumbrellaTest is Setup {
         assertGe(yumbrella.pricePerShare(), yumbrellaPps, "!pps");
 
         skip(yumbrella.profitMaxUnlockTime());
-        assertGe(yumbrella.pricePerShare(), yumbrellaPps, "!pps");  
+        assertGe(yumbrella.pricePerShare(), yumbrellaPps, "!pps");
         console2.log("yumbrella pps", yumbrella.pricePerShare());
     }
 }

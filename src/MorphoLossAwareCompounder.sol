@@ -43,6 +43,10 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
 
     mapping(address => bool) public allowed;
 
+    /// @notice Initializes strategy state for current MetaMorpho loss baseline.
+    /// @param _asset Underlying asset.
+    /// @param _name Strategy name.
+    /// @param _vault MetaMorpho vault address.
     constructor(
         address _asset,
         string memory _name,
@@ -94,12 +98,16 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
         }
     }
 
+    /// @notice Returns whether unreported loss currently exists on MetaMorpho.
+    /// @return True if loss exists, false otherwise.
     function lossExists() public view returns (bool) {
         uint256 lostAssetsOnMorpho = IMetaMorpho(address(vault)).lostAssets();
         if (lostAssetsOnMorpho > lastLostAssetsOnMorpho) return true; // already accrued, early exit
         return viewPendingLostAssets() > lostAssetsOnMorpho;
     }
 
+    /// @notice Estimates pending lost assets including withdraw queue market states.
+    /// @return Total estimated lost assets to compare against `lostAssets()`.
     function viewPendingLostAssets() public view returns (uint256) {
         IMetaMorpho morphoVault = IMetaMorpho(address(vault));
         IMorphoLike morpho = morphoVault.MORPHO();
@@ -131,6 +139,9 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
         }
     }
 
+    /// @notice Computes newly socializable strategy loss since last report.
+    /// @return newLosses Pro-rata strategy loss amount.
+    /// @return lostAssetsOnMorpho Current MetaMorpho lost assets value.
     function _calculateLoss()
         internal
         view
@@ -144,6 +155,9 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
             vault.totalSupply();
     }
 
+    /// @notice Deposit allowlist gate for this strategy.
+    /// @param _owner Depositor address.
+    /// @return Deposit limit for `_owner`.
     function availableDepositLimit(
         address _owner
     ) public view override returns (uint256) {
@@ -151,16 +165,21 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
         return 0;
     }
 
+    /// @notice Sets whether an address is allowed to deposit.
+    /// @param _owner Address to update.
+    /// @param _allowed True to allow deposits, false to block.
     function setAllowed(address _owner, bool _allowed) public onlyManagement {
         allowed[_owner] = _allowed;
     }
 
-    // if loss exists, we need to trigger the tend which will trigger the report.
+    /// @notice Tend trigger based on loss existence.
+    /// @return True when tend should run.
     function _tendTrigger() internal view override returns (bool) {
         return lossExists();
     }
 
-    // if loss exists, trigger a report to realize the loss immediately.
+    /// @notice Forces a keeper report when losses are detected.
+    /// @param _totalIdle Unused idle balance parameter from base strategy.
     function _tend(uint256 _totalIdle) internal override {
         if (lossExists()) {
             IKeeper(TokenizedStrategy.keeper()).report(address(this));

@@ -53,6 +53,12 @@ contract Yumbrella is Base4626Compounder {
     /// @notice Flag to block interactions until next strategy report sync.
     bool public pendingLossSync;
 
+    /// @notice Initializes Yumbrella strategy parameters.
+    /// @param _asset Underlying asset.
+    /// @param _name Strategy name.
+    /// @param _seniorVault Senior vault address.
+    /// @param _assetToSeniorAssetOracle Deprecated/unused parameter kept for compatibility.
+    /// @param _yieldVault ERC4626 vault used by Base4626Compounder.
     constructor(
         address _asset,
         string memory _name,
@@ -84,6 +90,8 @@ contract Yumbrella is Base4626Compounder {
                     VAULT CALLBACK FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Senior vault callback for current deposit limit.
+    /// @return Max amount the senior vault can deposit.
     function available_deposit_limit(
         address /* _receiver */
     ) external view returns (uint256) {
@@ -94,6 +102,9 @@ contract Yumbrella is Base4626Compounder {
     }
 
     // Don't allow withdraws if any of the strategies have unrealised losses.
+    /// @notice Senior vault callback for withdraw limit.
+    /// @param _strategies Optional strategy list from the vault.
+    /// @return Max withdrawable assets for the vault.
     function available_withdraw_limit(
         address,
         uint256 /* _maxLoss */,
@@ -127,6 +138,11 @@ contract Yumbrella is Base4626Compounder {
         return type(uint256).max;
     }
 
+    /// @notice Accountant callback from senior vault.
+    /// @param _gain Reported gain.
+    /// @param _loss Reported loss.
+    /// @return _fees Performance fees charged on gains.
+    /// @return _refunds Refund amount offered on losses.
     function report(
         address /* _strategy */,
         uint256 _gain,
@@ -199,6 +215,9 @@ contract Yumbrella is Base4626Compounder {
         return 0;
     }
 
+    /// @notice Returns user-specific deposit limit on the strategy.
+    /// @param _owner Depositor address.
+    /// @return Current maximum deposit for `_owner`.
     function availableDepositLimit(
         address _owner
     ) public view override returns (uint256) {
@@ -207,6 +226,8 @@ contract Yumbrella is Base4626Compounder {
     }
 
     // NOTE: This means users continue to earn rewards while unlocked but also can get slashed.
+    /// @notice Opens or increases a withdraw request in shares.
+    /// @param _shares Requested shares to unlock for withdrawal.
     function requestWithdraw(uint256 _shares) external {
         uint256 currentShares = withdrawRequests[msg.sender].shares;
         _shares = Math.min(
@@ -274,6 +295,8 @@ contract Yumbrella is Base4626Compounder {
         }
     }
 
+    /// @notice Harvest hook syncing senior-vault balance and resetting loss-sync lock.
+    /// @return _totalAssets Current strategy total assets after harvest.
     function _harvestAndReport()
         internal
         virtual
@@ -293,7 +316,8 @@ contract Yumbrella is Base4626Compounder {
         pendingLossSync = false;
     }
 
-    // just in case if the amount of senior vault shares is not redeemable in harvest
+    /// @notice Management helper to redeem senior vault shares manually.
+    /// @param _amount Shares to redeem, or `type(uint256).max` for full balance.
     function manualRedeemSeniorVaultShares(
         uint256 _amount
     ) external onlyManagement {
@@ -303,7 +327,8 @@ contract Yumbrella is Base4626Compounder {
         SENIOR_VAULT.redeem(_amount, address(this), address(this));
     }
 
-    // just in case if the idle amounts needs to be manually deposited to the yield vault
+    /// @notice Management helper to deposit idle assets into yield vault.
+    /// @param _amount Assets to deposit, or `type(uint256).max` for full idle balance.
     function manualDepositToYieldVault(
         uint256 _amount
     ) external onlyManagement {
@@ -368,6 +393,9 @@ contract Yumbrella is Base4626Compounder {
         rewardAuction = _rewardAuction;
     }
 
+    /// @notice Public keeper action to kick reward auction for a token.
+    /// @param _token Reward token address to auction.
+    /// @return Auction id returned by the auction contract.
     function kickAuction(
         address _token
     ) external onlyKeepers returns (uint256) {
@@ -440,6 +468,8 @@ contract Yumbrella is Base4626Compounder {
         collateralRatio = _collateralRatio;
     }
 
+    /// @notice Emergency withdraw hook from base strategy.
+    /// @param _amount Target amount to free.
     function _emergencyWithdraw(uint256 _amount) internal override {
         _freeFunds(Math.min(_amount, vaultsMaxWithdraw()));
     }

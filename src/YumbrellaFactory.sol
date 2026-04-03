@@ -17,6 +17,11 @@ contract YumbrellaFactory {
     /// @notice Track the deployments. asset => pool => yumbrella
     mapping(address => address) public deployments;
 
+    /// @notice Initializes factory role addresses.
+    /// @param _management Management address for factory updates.
+    /// @param _performanceFeeRecipient Default performance fee recipient for new strategies.
+    /// @param _keeper Default keeper for new strategies.
+    /// @param _emergencyAdmin Default emergency admin for new strategies.
     constructor(
         address _management,
         address _performanceFeeRecipient,
@@ -32,7 +37,11 @@ contract YumbrellaFactory {
     /**
      * @notice Deploy a new Yumbrella.
      * @param _asset The underlying asset for the strategy to use.
-     * @return . The address of the new yumbrella.
+     * @param _name Name for the strategy token.
+     * @param _seniorVault Senior vault linked to the strategy.
+     * @param _assetToSeniorOracle Deprecated/unused constructor arg kept for compatibility.
+     * @param _yieldVault ERC4626 vault used by the strategy.
+     * @return The address of the new yumbrella.
      */
     function newYumbrella(
         address _asset,
@@ -70,6 +79,10 @@ contract YumbrellaFactory {
         return address(_newYumbrella);
     }
 
+    /// @notice Updates default role addresses used for future deployments.
+    /// @param _management New management address.
+    /// @param _performanceFeeRecipient New performance fee recipient.
+    /// @param _keeper New keeper address.
     function setAddresses(
         address _management,
         address _performanceFeeRecipient,
@@ -81,12 +94,17 @@ contract YumbrellaFactory {
         keeper = _keeper;
     }
 
+    /// @notice Sets default loss limit ratio applied to newly deployed yumbrellas.
+    /// @param _newLossLimitRatio New loss limit ratio in bps.
     function setYumbrellaLossLimitRatio(uint256 _newLossLimitRatio) external {
         require(msg.sender == management, "!management");
-        require(_newLossLimitRatio < 10_000, "!loss limit");
+        require(_newLossLimitRatio <= 10_000, "!loss limit");
         yumbrellaLossLimitRatio = _newLossLimitRatio;
     }
 
+    /// @notice Checks if a strategy address matches recorded deployment for its asset.
+    /// @param _yumbrella Strategy address to validate.
+    /// @return True if it is the tracked deployment, false otherwise.
     function isDeployedStrategy(
         address _yumbrella
     ) external view returns (bool) {

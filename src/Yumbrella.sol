@@ -28,12 +28,6 @@ contract Yumbrella is Base4626Compounder {
     /// @notice The senior vault that will use Yumbrella as its accountant.
     IVault public immutable SENIOR_VAULT;
 
-    /// @notice The underlying asset of the senior vault.
-    ERC20 public immutable SENIOR_ASSET;
-
-    /// @notice The auction contract that will be used to sell the token for losses.
-    address public auction;
-
     /// @notice The auction contract that will be used to sell the rewards.
     address public rewardAuction;
 
@@ -53,9 +47,6 @@ contract Yumbrella is Base4626Compounder {
     /// @notice The performance fee to charge the senior vault.
     uint256 public seniorVaultPerformanceFee;
 
-    /// @notice The oracle that will be used to convert the underlying asset to the senior asset.
-    IOracle public assetToSeniorAssetOracle;
-
     /// @notice The withdraw requests of users.
     mapping(address => WithdrawRequest) public withdrawRequests;
 
@@ -70,9 +61,13 @@ contract Yumbrella is Base4626Compounder {
         address _yieldVault
     ) Base4626Compounder(_asset, _name, _yieldVault) {
         SENIOR_VAULT = IVault(_seniorVault);
-        SENIOR_ASSET = ERC20(SENIOR_VAULT.asset());
         // VAULT_FACTORY = IVaultFactory(IValtCorrected(_seniorVault).FACTORY());
-        assetToSeniorAssetOracle = IOracle(_assetToSeniorAssetOracle);
+
+        // _yieldVault == asset is checked in Base4626Compounder constructor
+        require(
+            address(asset) == IVault(_seniorVault).asset(),
+            "asset mismatch"
+        );
 
         seniorVaultPerformanceFee = 1_000;
         refundRatio = 10_000;
@@ -93,8 +88,7 @@ contract Yumbrella is Base4626Compounder {
         address /* _receiver */
     ) external view returns (uint256) {
         uint256 currentAssets = SENIOR_VAULT.totalAssets();
-        uint256 maxAssets = (_fromAssetToSeniorAsset(valueOfVault()) *
-            collateralRatio) / WAD;
+        uint256 maxAssets = (valueOfVault() * collateralRatio) / WAD;
 
         return currentAssets >= maxAssets ? 0 : maxAssets - currentAssets;
     }
@@ -143,57 +137,20 @@ contract Yumbrella is Base4626Compounder {
         if (_gain > 0) {
             _fees = (_gain * seniorVaultPerformanceFee) / MAX_BPS;
         } else {
-            // Check if the auction was kicked and filled.
-            if (auction != address(0)) {
-                require(
-                    Auction(auction).available(address(asset)) == 0,
-                    "auction not filled"
-                );
-            }
             _refunds = Math.min(
                 (_loss * refundRatio) / MAX_BPS,
                 valueOfVault()
             );
-            uint256 idleSeniorVaultAssetBalance = SENIOR_ASSET.balanceOf(
+            uint256 idleSeniorVaultAssetBalance = asset.balanceOf(
                 address(this)
             );
             if (_refunds > idleSeniorVaultAssetBalance) {
                 _freeFunds(_refunds - idleSeniorVaultAssetBalance);
             }
-            SENIOR_ASSET.forceApprove(address(SENIOR_VAULT), _refunds);
+            asset.forceApprove(address(SENIOR_VAULT), _refunds);
             // Block deposits/withdrawals until keeper performs the next report sync.
             pendingLossSync = true;
         }
-    }
-
-    /**
-     * @dev Convert the amount of `asset` to `seniorAsset`.
-     * @param _amount The amount of `asset` to convert.
-     * @return The amount of `seniorAsset` that corresponds to the `_amount` of `asset`.
-     */
-    function _fromAssetToSeniorAsset(
-        uint256 _amount
-    ) internal view returns (uint256) {
-        if (address(assetToSeniorAssetOracle) == address(0)) {
-            // means that senior asset and asset are the same
-            return _amount;
-        }
-        return (_amount * assetToSeniorAssetOracle.getRate()) / WAD;
-    }
-
-    /**
-     * @dev Convert the amount of `seniorAsset` to `asset`.
-     * @param _amount The amount of `seniorAsset` to convert.
-     * @return The amount of `asset` that corresponds to the `_amount` of `seniorAsset`.
-     */
-    function _fromSeniorAssetToAsset(
-        uint256 _amount
-    ) internal view returns (uint256) {
-        if (address(assetToSeniorAssetOracle) == address(0)) {
-            // means that senior asset and asset are the same
-            return _amount;
-        }
-        return (_amount * WAD) / assetToSeniorAssetOracle.getRate();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -306,24 +263,12 @@ contract Yumbrella is Base4626Compounder {
 
         // if there are losses on strategies they need to be reported first.
         if (_loss > 0 && !_lossExistsOnCompounder) {
-            if (auction != address(0)) {
-                uint256 toAuction = Math.min(
-                    _fromSeniorAssetToAsset((_loss * refundRatio) / MAX_BPS),
-                    valueOfVault()
-                );
-                toAuction = Math.min(toAuction, vaultsMaxWithdraw());
-                _freeFunds(toAuction);
-                asset.safeTransfer(address(auction), toAuction);
-                Auction(auction).kick(address(asset));
-            }
             // Eat the loss.
             IKeeper(TokenizedStrategy.keeper()).report(address(this));
         }
 
         // no loss so deposit idle to yield vault
-        uint256 idleSeniorVaultAssetBalance = SENIOR_ASSET.balanceOf(
-            address(this)
-        );
+        uint256 idleSeniorVaultAssetBalance = asset.balanceOf(address(this));
         if (idleSeniorVaultAssetBalance > 0) {
             vault.deposit(idleSeniorVaultAssetBalance, address(this));
         }
@@ -363,7 +308,7 @@ contract Yumbrella is Base4626Compounder {
         uint256 _amount
     ) external onlyManagement {
         if (_amount == type(uint256).max) {
-            _amount = SENIOR_ASSET.balanceOf(address(this));
+            _amount = asset.balanceOf(address(this));
         }
         vault.deposit(_amount, address(this));
     }
@@ -396,29 +341,11 @@ contract Yumbrella is Base4626Compounder {
             }
         }
 
-        if (SENIOR_ASSET.balanceOf(address(this)) > 0) {
+        if (asset.balanceOf(address(this)) > 0) {
             return true;
         }
 
         return false;
-    }
-
-    /**
-     * @dev Set the auction address.
-     * @param _auction The address of the auction.
-     */
-    function setAuction(address _auction) external onlyEmergencyAuthorized {
-        if (_auction != address(0)) {
-            require(
-                Auction(_auction).want() == address(SENIOR_ASSET),
-                "wrong want"
-            );
-            require(
-                Auction(_auction).receiver() == address(this),
-                "wrong receiver"
-            );
-        }
-        auction = _auction;
     }
 
     /**
@@ -441,41 +368,26 @@ contract Yumbrella is Base4626Compounder {
         rewardAuction = _rewardAuction;
     }
 
-    function enableAuction(
-        address _from,
-        address _auction
-    ) external onlyEmergencyAuthorized {
-        require(
-            _auction == auction || _auction == rewardAuction,
-            "wrong auction"
-        );
-        if (_auction == auction) {
-            // asset to senior asset auction
-            require(_from == address(asset), "wrong from");
-        } else {
-            // reward auction
-            require(
-                _from != address(asset) &&
-                    _from != address(SENIOR_ASSET) &&
-                    _from != address(SENIOR_VAULT),
-                "wrong from"
-            );
-        }
-        Auction(_auction).enable(_from);
+    function kickAuction(
+        address _token
+    ) external onlyKeepers returns (uint256) {
+        return _kickAuction(_token);
     }
 
     /**
-     * @dev Set the asset to senior oracle address.
-     * @param _assetToSeniorAssetOracle The address of the asset to senior asset oracle.
+     * @dev Kick an auction for a given token.
+     * @param _from The token that was being sold.
      */
-    function setAssetToSeniorAssetOracle(
-        address _assetToSeniorAssetOracle
-    ) external onlyEmergencyAuthorized {
+    function _kickAuction(address _from) internal virtual returns (uint256) {
         require(
-            IOracle(_assetToSeniorAssetOracle).getRate() > 0,
-            "invalid oracle"
+            _from != address(asset) &&
+                _from != address(vault) &&
+                _from != address(SENIOR_VAULT),
+            "cannot kick"
         );
-        assetToSeniorAssetOracle = IOracle(_assetToSeniorAssetOracle);
+        uint256 _balance = ERC20(_from).balanceOf(address(this));
+        ERC20(_from).safeTransfer(rewardAuction, _balance);
+        return Auction(rewardAuction).kick(_from);
     }
 
     /**

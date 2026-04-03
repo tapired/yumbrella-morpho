@@ -342,6 +342,7 @@ contract Setup is ExtendedTest, IEvents, Clonable {
     }
 
     function _setYieldVaultAddrs() internal {
-        yieldVaultAddrs["USDC"] = 0xBe53A109B494E5c9f97b9Cd39Fe969BE68BF6204; // yvUSDC-1
+        // address(0) means yield vault is the morpho loss aware compounder
+        yieldVaultAddrs["USDC"] = address(0); // 0xBe53A109B494E5c9f97b9Cd39Fe969BE68BF6204; // yvUSDC-1
     }
 }

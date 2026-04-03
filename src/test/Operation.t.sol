@@ -16,6 +16,7 @@ contract OperationTest is Setup {
 
     function test_setupStrategyOK() public {
         console2.log("address of strategy", address(yumbrella));
+        if (yieldVault == address(0)) assertTrue(yumbrella.vault() == address(morphoLossAwareCompounder), "!vault mismatch");
         assertTrue(address(0) != address(yumbrella));
         assertEq(yumbrella.asset(), address(asset));
         assertEq(yumbrella.management(), management);

@@ -128,6 +128,13 @@ contract TrioFactory {
             .setPendingManagement(management);
         IYumbrella(yumbrella).setPendingManagement(management);
 
+        if (p.yieldVault == address(0)) {
+            IMorphoLossAwareCompounder(morphoLossAwareCompounder).setAllowed(
+                yumbrella,
+                true
+            );
+        }
+
         emit NewTrio(yumbrella, morphoLossAwareCompounder, seniorVault);
     }
 
@@ -216,13 +223,19 @@ contract TrioFactory {
         address seniorVault,
         address morphoLossAwareCompounder
     ) internal returns (address yumbrella) {
+        // Generic routing: use explicit yield vault when provided,
+        // otherwise default to the deployed Morpho loss-aware compounder.
+        address targetYieldVault = p.yieldVault == address(0)
+            ? morphoLossAwareCompounder
+            : p.yieldVault;
+
         yumbrella = address(
             new Yumbrella(
                 p.asset,
                 p.yumbrellaName,
                 seniorVault,
                 p.assetToSeniorOracle,
-                p.yieldVault
+                targetYieldVault
             )
         );
         IYumbrella(yumbrella).setPerformanceFeeRecipient(

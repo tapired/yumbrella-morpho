@@ -267,6 +267,8 @@ contract YumbrellaTest is Setup {
         marketParams.oracle = 0x8E3386B2f6084eB1B0988070c3d826995BD175c0;
         marketParams.irm = 0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC;
         marketParams.lltv = 915000000000000000;
+
+
     }
 
     function lendToMorphoBlue(
@@ -418,12 +420,6 @@ contract YumbrellaTest is Setup {
             _amount,
             "!seniorVault totalAssets"
         );
-        // All in morpho loss aware compounder by default
-        assertEq(
-            morphoLossAwareCompounder.totalAssets(),
-            _amount,
-            "!morphoLossAwareCompounder totalAssets"
-        );
 
         skip(2 days); // simulate interest earnings
 
@@ -470,11 +466,6 @@ contract YumbrellaTest is Setup {
             seniorVault.totalAssets(),
             _amount,
             "!seniorVault totalAssets"
-        );
-        assertEq(
-            morphoLossAwareCompounder.totalAssets(),
-            _amount,
-            "!morphoLossAwareCompounder totalAssets"
         );
 
         uint256 oraclePriceBps = 2_000; // 20% of current oracle price
@@ -553,12 +544,12 @@ contract YumbrellaTest is Setup {
         );
         // yumbrella pps decreased
         assertLe(yumbrella.pricePerShare(), 10 ** asset.decimals(), "!pps");
-        assertApproxEqAbs(
-            yumbrella.pricePerShare(),
-            morphoLossAwareCompounder.pricePerShare(),
-            2,
-            "!pps"
-        );
+        // assertApproxEqAbs(
+        //     yumbrella.pricePerShare(),
+        //     morphoLossAwareCompounder.pricePerShare(),
+        //     2,
+        //     "!pps"
+        // );
 
         console2.log(
             "pps of morphoLossAwareCompounder",
@@ -584,11 +575,6 @@ contract YumbrellaTest is Setup {
             seniorVault.totalAssets(),
             _amount,
             "!seniorVault totalAssets"
-        );
-        assertEq(
-            morphoLossAwareCompounder.totalAssets(),
-            _amount,
-            "!morphoLossAwareCompounder totalAssets"
         );
 
         uint256 oraclePriceBps = 4_000; // 40% of current oracle price

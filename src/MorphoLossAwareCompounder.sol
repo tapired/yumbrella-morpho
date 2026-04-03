@@ -4,6 +4,7 @@ pragma solidity ^0.8.18;
 import {BaseStrategy, ERC20} from "@tokenized-strategy/BaseStrategy.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {MorphoCompounder} from "./MorphoCompounder.sol";
+import {MinimalMorphoExpectedSupplyLib, IMorphoLike, MarketParams} from "./lib/MinimalMorphoExpectedSupplyLib.sol";
 
 // Import interfaces for many popular DeFi projects, or add your own!
 //import "../interfaces/<protocol>/<Interface>.sol";
@@ -23,14 +24,29 @@ import {MorphoCompounder} from "./MorphoCompounder.sol";
 
 interface IMetaMorpho {
     function lostAssets() external view returns (uint256);
+    function MORPHO() external view returns (IMorphoLike);
+    function withdrawQueueLength() external view returns (uint256);
+    function withdrawQueue(uint256 i) external view returns (bytes32);
+    function lastTotalAssets() external view returns (uint256);
+}
+
+interface IKeeper {
+    function report(address _strategy) external returns (uint256, uint256);
 }
 
 contract MorphoLossAwareCompounder is MorphoCompounder {
     using SafeERC20 for ERC20;
+    using MinimalMorphoExpectedSupplyLib for IMorphoLike;
 
     uint256 public lastLostAssetsOnMorpho;
     uint256 public lastMorphoLosses;
 
+    mapping(address => bool) public allowed;
+
+    /// @notice Initializes strategy state for current MetaMorpho loss baseline.
+    /// @param _asset Underlying asset.
+    /// @param _name Strategy name.
+    /// @param _vault MetaMorpho vault address.
     constructor(
         address _asset,
         string memory _name,
@@ -82,12 +98,50 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
         }
     }
 
-    function lossExists() external view returns (bool) {
+    /// @notice Returns whether unreported loss currently exists on MetaMorpho.
+    /// @return True if loss exists, false otherwise.
+    function lossExists() public view returns (bool) {
         uint256 lostAssetsOnMorpho = IMetaMorpho(address(vault)).lostAssets();
-        if (lostAssetsOnMorpho > lastLostAssetsOnMorpho) return true;
-        return false;
+        if (lostAssetsOnMorpho > lastLostAssetsOnMorpho) return true; // already accrued, early exit
+        return viewPendingLostAssets() > lostAssetsOnMorpho;
     }
 
+    /// @notice Estimates pending lost assets including withdraw queue market states.
+    /// @return Total estimated lost assets to compare against `lostAssets()`.
+    function viewPendingLostAssets() public view returns (uint256) {
+        IMetaMorpho morphoVault = IMetaMorpho(address(vault));
+        IMorphoLike morpho = morphoVault.MORPHO();
+
+        uint256 realTotalAssets;
+        uint256 length = morphoVault.withdrawQueueLength();
+
+        for (uint256 i; i < length; ++i) {
+            bytes32 id = morphoVault.withdrawQueue(i);
+            MarketParams memory marketParams = morpho.idToMarketParams(id);
+
+            realTotalAssets += MinimalMorphoExpectedSupplyLib
+                .expectedSupplyAssets(
+                    morpho,
+                    marketParams,
+                    address(morphoVault)
+                );
+        }
+
+        uint256 last = morphoVault.lastTotalAssets();
+        uint256 lost = morphoVault.lostAssets();
+
+        uint256 accountedRealAssets = last - lost;
+
+        if (realTotalAssets < accountedRealAssets) {
+            return last - realTotalAssets;
+        } else {
+            return lost;
+        }
+    }
+
+    /// @notice Computes newly socializable strategy loss since last report.
+    /// @return newLosses Pro-rata strategy loss amount.
+    /// @return lostAssetsOnMorpho Current MetaMorpho lost assets value.
     function _calculateLoss()
         internal
         view
@@ -99,5 +153,36 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
         newLosses =
             (vault.balanceOf(address(this)) * lostAssetsSinceLastReport) /
             vault.totalSupply();
+    }
+
+    /// @notice Deposit allowlist gate for this strategy.
+    /// @param _owner Depositor address.
+    /// @return Deposit limit for `_owner`.
+    function availableDepositLimit(
+        address _owner
+    ) public view override returns (uint256) {
+        if (allowed[_owner]) return super.availableDepositLimit(_owner);
+        return 0;
+    }
+
+    /// @notice Sets whether an address is allowed to deposit.
+    /// @param _owner Address to update.
+    /// @param _allowed True to allow deposits, false to block.
+    function setAllowed(address _owner, bool _allowed) public onlyManagement {
+        allowed[_owner] = _allowed;
+    }
+
+    /// @notice Tend trigger based on loss existence.
+    /// @return True when tend should run.
+    function _tendTrigger() internal view override returns (bool) {
+        return lossExists();
+    }
+
+    /// @notice Forces a keeper report when losses are detected.
+    /// @param _totalIdle Unused idle balance parameter from base strategy.
+    function _tend(uint256 _totalIdle) internal override {
+        if (lossExists()) {
+            IKeeper(TokenizedStrategy.keeper()).report(address(this));
+        }
     }
 }

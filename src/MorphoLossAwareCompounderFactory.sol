@@ -20,6 +20,11 @@ contract MorphoLossAwareCompounderFactory {
     // Track deployments by asset and target vault.
     mapping(address => mapping(address => address)) public deployments;
 
+    /// @notice Initializes factory role addresses.
+    /// @param _management Management address for factory updates.
+    /// @param _performanceFeeRecipient Default performance fee recipient for new strategies.
+    /// @param _keeper Default keeper for new strategies.
+    /// @param _emergencyAdmin Default emergency admin for new strategies.
     constructor(
         address _management,
         address _performanceFeeRecipient,
@@ -32,6 +37,11 @@ contract MorphoLossAwareCompounderFactory {
         emergencyAdmin = _emergencyAdmin;
     }
 
+    /// @notice Deploys a new Morpho loss-aware compounder.
+    /// @param _asset Underlying asset.
+    /// @param _name Strategy name.
+    /// @param _vault Target MetaMorpho vault.
+    /// @return Address of the deployed strategy.
     function newMorphoLossAwareCompounder(
         address _asset,
         string calldata _name,
@@ -52,6 +62,10 @@ contract MorphoLossAwareCompounderFactory {
         return address(_strategy);
     }
 
+    /// @notice Updates default role addresses used for future deployments.
+    /// @param _management New management address.
+    /// @param _performanceFeeRecipient New performance fee recipient.
+    /// @param _keeper New keeper address.
     function setAddresses(
         address _management,
         address _performanceFeeRecipient,
@@ -63,6 +77,11 @@ contract MorphoLossAwareCompounderFactory {
         keeper = _keeper;
     }
 
+    /// @notice Checks if a strategy is the tracked deployment for an asset/vault pair.
+    /// @param _asset Underlying asset.
+    /// @param _vault Target MetaMorpho vault.
+    /// @param _strategy Strategy address to validate.
+    /// @return True if it matches the recorded deployment, false otherwise.
     function isDeployedStrategy(
         address _asset,
         address _vault,

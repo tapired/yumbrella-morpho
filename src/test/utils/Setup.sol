@@ -9,10 +9,12 @@ import {Yumbrella, ERC20, IOracle, IVault} from "../../Yumbrella.sol";
 import {MorphoLossAwareCompounder} from "../../MorphoLossAwareCompounder.sol";
 import {IMorphoLossAwareCompounder} from "../../interfaces/IMorphoLossAwareCompounder.sol";
 import {MorphoLossAwareCompounderFactory} from "../../MorphoLossAwareCompounderFactory.sol";
+import {TrioFactory} from "../../TrioFactory.sol";
 import {YumbrellaFactory} from "../../YumbrellaFactory.sol";
 import {IYumbrella} from "../../interfaces/IYumbrella.sol";
 import {IVaultFactory} from "@yearn-vaults/interfaces/IVaultFactory.sol";
-
+import {YumbrellaKeeper} from "../../YumbrellaKeeper.sol";
+import {IYumbrellaKeeper} from "../../interfaces/IYumbrellaKeeper.sol";
 import {MockOracle} from "../Mocks/MockOracle.sol";
 import {Clonable} from "@periphery/utils/Clonable.sol";
 
@@ -34,6 +36,7 @@ contract Setup is ExtendedTest, IEvents, Clonable {
     // Contract instances that we will use repeatedly.
     ERC20 public asset; // yumbrella asset
     IYumbrella public yumbrella;
+    TrioFactory public trioFactory;
     YumbrellaFactory public yumbrellaFactory;
     MorphoLossAwareCompounderFactory public morphoLossAwareCompounderFactory;
     IMorphoLossAwareCompounder public morphoLossAwareCompounder;
@@ -43,6 +46,7 @@ contract Setup is ExtendedTest, IEvents, Clonable {
     IVault public seniorVault;
     ERC20 public seniorVaultAsset;
     IOracle public assetToSeniorOracle;
+    IYumbrellaKeeper public yumbrellaKeeper;
 
     VyperDeployer public vyperDeployer = new VyperDeployer();
 
@@ -85,30 +89,60 @@ contract Setup is ExtendedTest, IEvents, Clonable {
 
         // Set decimals
         decimals = asset.decimals();
-
-        yumbrellaFactory = new YumbrellaFactory(
-            management,
-            performanceFeeRecipient,
-            keeper,
-            emergencyAdmin
-        );
-
-        morphoLossAwareCompounderFactory = new MorphoLossAwareCompounderFactory(
-            management,
-            performanceFeeRecipient,
-            keeper,
-            emergencyAdmin
-        );
-
-        morphoLossAwareCompounder = setUpMorphoLossAwareCompounder();
-        seniorVault = setUpVault();
-
         assetToSeniorOracle = new MockOracle();
 
-        // Deploy strategy and set variables
-        yumbrella = IYumbrella(
-            setUpYumbrella(address(seniorVault), address(assetToSeniorOracle))
+        yumbrellaKeeper = IYumbrellaKeeper(
+            address(new YumbrellaKeeper(management))
         );
+        vm.prank(management);
+        yumbrellaKeeper.setKeeper(keeper, true);
+
+        trioFactory = new TrioFactory(
+            management,
+            performanceFeeRecipient,
+            address(yumbrellaKeeper),
+            emergencyAdmin,
+            address(yumbrellaKeeper),
+            address(vaultFactory)
+        );
+
+        vm.prank(management);
+        yumbrellaKeeper.setManager(address(trioFactory), true);
+
+        vm.prank(management);
+        (
+            address _yumbrella,
+            address _morphoLossAwareCompounder,
+            address _seniorVault
+        ) = trioFactory.deployTrio(
+                TrioFactory.DeployParams({
+                    asset: address(asset),
+                    yieldVault: yieldVault,
+                    morphoVault: morphoVault,
+                    assetToSeniorOracle: address(assetToSeniorOracle),
+                    yumbrellaName: "Tokenized Strategy",
+                    morphoName: "Morpho Loss Aware Compounder",
+                    seniorVaultName: "Test vault",
+                    seniorVaultSymbol: "tsVault",
+                    seniorVaultProfitMaxUnlockTime: 10 days,
+                    vaultManagement: vaultManagement,
+                    finalRoleManager: management,
+                    morphoLossLimitRatio: 5_000
+                })
+            );
+
+        yumbrella = IYumbrella(_yumbrella);
+        morphoLossAwareCompounder = IMorphoLossAwareCompounder(
+            _morphoLossAwareCompounder
+        );
+        seniorVault = IVault(_seniorVault);
+
+        vm.prank(management);
+        morphoLossAwareCompounder.acceptManagement();
+        vm.prank(management);
+        yumbrella.acceptManagement();
+        vm.prank(management);
+        seniorVault.accept_role_manager();
 
         factory = yumbrella.FACTORY();
 
@@ -157,8 +191,15 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         // Give the vault manager all the roles
         IVault(_vault).set_role(vaultManagement, Roles.ALL);
 
+        vm.prank(management);
+        // YumbrellaKeeper executes process_report via helper methods.
+        IVault(_vault).set_role(address(yumbrellaKeeper), Roles.ALL);
+
         vm.prank(vaultManagement);
         IVault(_vault).set_deposit_limit(type(uint256).max);
+
+        vm.prank(management);
+        morphoLossAwareCompounder.setAllowed(_vault, true);
 
         return IVault(_vault);
     }
@@ -301,6 +342,7 @@ contract Setup is ExtendedTest, IEvents, Clonable {
     }
 
     function _setYieldVaultAddrs() internal {
-        yieldVaultAddrs["USDC"] = 0xBe53A109B494E5c9f97b9Cd39Fe969BE68BF6204; // yvUSDC-1
+        // address(0) means yield vault is the morpho loss aware compounder
+        yieldVaultAddrs["USDC"] = address(0); // 0xBe53A109B494E5c9f97b9Cd39Fe969BE68BF6204; // yvUSDC-1
     }
 }

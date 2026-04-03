@@ -14,4 +14,6 @@ interface IYumbrella is IStrategy, IBaseHealthCheck, IWithdrawLimitModule {
     function requestWithdraw(uint256 _amount) external;
 
     function withdrawCooldown() external view returns (uint256);
+
+    function vault() external view returns (address);
 }

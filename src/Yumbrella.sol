@@ -28,12 +28,6 @@ contract Yumbrella is Base4626Compounder {
     /// @notice The senior vault that will use Yumbrella as its accountant.
     IVault public immutable SENIOR_VAULT;
 
-    /// @notice The underlying asset of the senior vault.
-    ERC20 public immutable SENIOR_ASSET;
-
-    /// @notice The auction contract that will be used to sell the token for losses.
-    address public auction;
-
     /// @notice The auction contract that will be used to sell the rewards.
     address public rewardAuction;
 
@@ -53,12 +47,18 @@ contract Yumbrella is Base4626Compounder {
     /// @notice The performance fee to charge the senior vault.
     uint256 public seniorVaultPerformanceFee;
 
-    /// @notice The oracle that will be used to convert the underlying asset to the senior asset.
-    IOracle public assetToSeniorAssetOracle;
-
     /// @notice The withdraw requests of users.
     mapping(address => WithdrawRequest) public withdrawRequests;
 
+    /// @notice Flag to block interactions until next strategy report sync.
+    bool public pendingLossSync;
+
+    /// @notice Initializes Yumbrella strategy parameters.
+    /// @param _asset Underlying asset.
+    /// @param _name Strategy name.
+    /// @param _seniorVault Senior vault address.
+    /// @param _assetToSeniorAssetOracle Deprecated/unused parameter kept for compatibility.
+    /// @param _yieldVault ERC4626 vault used by Base4626Compounder.
     constructor(
         address _asset,
         string memory _name,
@@ -67,9 +67,13 @@ contract Yumbrella is Base4626Compounder {
         address _yieldVault
     ) Base4626Compounder(_asset, _name, _yieldVault) {
         SENIOR_VAULT = IVault(_seniorVault);
-        SENIOR_ASSET = ERC20(SENIOR_VAULT.asset());
         // VAULT_FACTORY = IVaultFactory(IValtCorrected(_seniorVault).FACTORY());
-        assetToSeniorAssetOracle = IOracle(_assetToSeniorAssetOracle);
+
+        // _yieldVault == asset is checked in Base4626Compounder constructor
+        require(
+            address(asset) == IVault(_seniorVault).asset(),
+            "asset mismatch"
+        );
 
         seniorVaultPerformanceFee = 1_000;
         refundRatio = 10_000;
@@ -86,36 +90,47 @@ contract Yumbrella is Base4626Compounder {
                     VAULT CALLBACK FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Senior vault callback for current deposit limit.
+    /// @return Max amount the senior vault can deposit.
     function available_deposit_limit(
         address /* _receiver */
     ) external view returns (uint256) {
         uint256 currentAssets = SENIOR_VAULT.totalAssets();
-        uint256 maxAssets = (_fromAssetToSeniorAsset(valueOfVault()) *
-            collateralRatio) / WAD;
+        uint256 maxAssets = (valueOfVault() * collateralRatio) / WAD;
 
         return currentAssets >= maxAssets ? 0 : maxAssets - currentAssets;
     }
 
     // Don't allow withdraws if any of the strategies have unrealised losses.
+    /// @notice Senior vault callback for withdraw limit.
+    /// @param _strategies Optional strategy list from the vault.
+    /// @return Max withdrawable assets for the vault.
     function available_withdraw_limit(
         address,
         uint256 /* _maxLoss */,
         address[] calldata _strategies
     ) external view returns (uint256) {
+        address[] memory strategies;
+        if (SENIOR_VAULT.use_default_queue() || _strategies.length == 0) {
+            strategies = SENIOR_VAULT.get_default_queue();
+        } else {
+            strategies = _strategies;
+        }
+
         // This check is basically ensures that if there is a loss on the senior vault strategies
         // that are reported by "harvestAndReport" on the strategy level but not yet realized on the vault level.
-        for (uint256 i = 0; i < _strategies.length; i++) {
-            uint256 debt = SENIOR_VAULT.strategies(_strategies[i]).current_debt;
+        for (uint256 i = 0; i < strategies.length; i++) {
+            uint256 debt = SENIOR_VAULT.strategies(strategies[i]).current_debt;
             if (debt > 0) {
                 if (
                     SENIOR_VAULT.assess_share_of_unrealised_losses(
-                        _strategies[i],
+                        strategies[i],
                         debt
                     ) !=
                     0 ||
                     // but we also need to check if there are losses on the vaults strategies
                     // that are not reported by "harvestAndReport" on the strategy level.
-                    IMorphoLossAwareCompounder(_strategies[i]).lossExists()
+                    IMorphoLossAwareCompounder(strategies[i]).lossExists()
                 ) return 0;
             }
         }
@@ -123,6 +138,11 @@ contract Yumbrella is Base4626Compounder {
         return type(uint256).max;
     }
 
+    /// @notice Accountant callback from senior vault.
+    /// @param _gain Reported gain.
+    /// @param _loss Reported loss.
+    /// @return _fees Performance fees charged on gains.
+    /// @return _refunds Refund amount offered on losses.
     function report(
         address /* _strategy */,
         uint256 _gain,
@@ -133,50 +153,20 @@ contract Yumbrella is Base4626Compounder {
         if (_gain > 0) {
             _fees = (_gain * seniorVaultPerformanceFee) / MAX_BPS;
         } else {
-            // Check if the auction was kicked and filled.
-            if (auction != address(0)) {
-                require(
-                    Auction(auction).available(address(asset)) == 0,
-                    "auction not filled"
-                );
-            }
             _refunds = Math.min(
                 (_loss * refundRatio) / MAX_BPS,
                 valueOfVault()
             );
-            _freeFunds(_refunds);
-            SENIOR_ASSET.forceApprove(address(SENIOR_VAULT), _refunds);
+            uint256 idleSeniorVaultAssetBalance = asset.balanceOf(
+                address(this)
+            );
+            if (_refunds > idleSeniorVaultAssetBalance) {
+                _freeFunds(_refunds - idleSeniorVaultAssetBalance);
+            }
+            asset.forceApprove(address(SENIOR_VAULT), _refunds);
+            // Block deposits/withdrawals until keeper performs the next report sync.
+            pendingLossSync = true;
         }
-    }
-
-    /**
-     * @dev Convert the amount of `asset` to `seniorAsset`.
-     * @param _amount The amount of `asset` to convert.
-     * @return The amount of `seniorAsset` that corresponds to the `_amount` of `asset`.
-     */
-    function _fromAssetToSeniorAsset(
-        uint256 _amount
-    ) internal view returns (uint256) {
-        if (address(assetToSeniorAssetOracle) == address(0)) {
-            // means that senior asset and asset are the same
-            return _amount;
-        }
-        return (_amount * assetToSeniorAssetOracle.getRate()) / WAD;
-    }
-
-    /**
-     * @dev Convert the amount of `seniorAsset` to `asset`.
-     * @param _amount The amount of `seniorAsset` to convert.
-     * @return The amount of `asset` that corresponds to the `_amount` of `seniorAsset`.
-     */
-    function _fromSeniorAssetToAsset(
-        uint256 _amount
-    ) internal view returns (uint256) {
-        if (address(assetToSeniorAssetOracle) == address(0)) {
-            // means that senior asset and asset are the same
-            return _amount;
-        }
-        return (_amount * WAD) / assetToSeniorAssetOracle.getRate();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -204,6 +194,8 @@ contract Yumbrella is Base4626Compounder {
     function availableWithdrawLimit(
         address _owner
     ) public view override returns (uint256) {
+        if (pendingLossSync) return 0;
+
         WithdrawRequest memory request = withdrawRequests[_owner];
         if (
             // If the cooldown period has passed
@@ -223,7 +215,19 @@ contract Yumbrella is Base4626Compounder {
         return 0;
     }
 
+    /// @notice Returns user-specific deposit limit on the strategy.
+    /// @param _owner Depositor address.
+    /// @return Current maximum deposit for `_owner`.
+    function availableDepositLimit(
+        address _owner
+    ) public view override returns (uint256) {
+        if (pendingLossSync) return 0;
+        return super.availableDepositLimit(_owner);
+    }
+
     // NOTE: This means users continue to earn rewards while unlocked but also can get slashed.
+    /// @notice Opens or increases a withdraw request in shares.
+    /// @param _shares Requested shares to unlock for withdrawal.
     function requestWithdraw(uint256 _shares) external {
         uint256 currentShares = withdrawRequests[msg.sender].shares;
         _shares = Math.min(
@@ -280,38 +284,58 @@ contract Yumbrella is Base4626Compounder {
 
         // if there are losses on strategies they need to be reported first.
         if (_loss > 0 && !_lossExistsOnCompounder) {
-            if (auction != address(0)) {
-                uint256 toAuction = Math.min(
-                    _fromSeniorAssetToAsset((_loss * refundRatio) / MAX_BPS),
-                    valueOfVault()
-                );
-                toAuction = Math.min(toAuction, vaultsMaxWithdraw());
-                _freeFunds(toAuction);
-                asset.safeTransfer(address(auction), toAuction);
-                Auction(auction).kick(address(asset));
-            }
             // Eat the loss.
             IKeeper(TokenizedStrategy.keeper()).report(address(this));
         }
+
+        // no loss so deposit idle to yield vault
+        uint256 idleSeniorVaultAssetBalance = asset.balanceOf(address(this));
+        if (idleSeniorVaultAssetBalance > 0) {
+            vault.deposit(idleSeniorVaultAssetBalance, address(this));
+        }
     }
 
+    /// @notice Harvest hook syncing senior-vault balance and resetting loss-sync lock.
+    /// @return _totalAssets Current strategy total assets after harvest.
     function _harvestAndReport()
         internal
         virtual
         override
         returns (uint256 _totalAssets)
     {
-        _totalAssets = super._harvestAndReport();
-
         uint256 seniorVaultShares = SENIOR_VAULT.balanceOf(address(this));
         if (seniorVaultShares > 0) {
-            uint256 redeemed = SENIOR_VAULT.redeem(
+            SENIOR_VAULT.redeem(
                 seniorVaultShares,
                 address(this),
                 address(this)
             );
-            _totalAssets += redeemed;
         }
+
+        _totalAssets = super._harvestAndReport();
+        pendingLossSync = false;
+    }
+
+    /// @notice Management helper to redeem senior vault shares manually.
+    /// @param _amount Shares to redeem, or `type(uint256).max` for full balance.
+    function manualRedeemSeniorVaultShares(
+        uint256 _amount
+    ) external onlyManagement {
+        if (_amount == type(uint256).max) {
+            _amount = SENIOR_VAULT.balanceOf(address(this));
+        }
+        SENIOR_VAULT.redeem(_amount, address(this), address(this));
+    }
+
+    /// @notice Management helper to deposit idle assets into yield vault.
+    /// @param _amount Assets to deposit, or `type(uint256).max` for full idle balance.
+    function manualDepositToYieldVault(
+        uint256 _amount
+    ) external onlyManagement {
+        if (_amount == type(uint256).max) {
+            _amount = asset.balanceOf(address(this));
+        }
+        vault.deposit(_amount, address(this));
     }
 
     /**
@@ -341,25 +365,12 @@ contract Yumbrella is Base4626Compounder {
                 }
             }
         }
-        return false;
-    }
 
-    /**
-     * @dev Set the auction address.
-     * @param _auction The address of the auction.
-     */
-    function setAuction(address _auction) external onlyEmergencyAuthorized {
-        if (_auction != address(0)) {
-            require(
-                Auction(_auction).want() == address(SENIOR_ASSET),
-                "wrong want"
-            );
-            require(
-                Auction(_auction).receiver() == address(this),
-                "wrong receiver"
-            );
+        if (asset.balanceOf(address(this)) > 0) {
+            return true;
         }
-        auction = _auction;
+
+        return false;
     }
 
     /**
@@ -382,41 +393,29 @@ contract Yumbrella is Base4626Compounder {
         rewardAuction = _rewardAuction;
     }
 
-    function enableAuction(
-        address _from,
-        address _auction
-    ) external onlyEmergencyAuthorized {
-        require(
-            _auction == auction || _auction == rewardAuction,
-            "wrong auction"
-        );
-        if (_auction == auction) {
-            // asset to senior asset auction
-            require(_from == address(asset), "wrong from");
-        } else {
-            // reward auction
-            require(
-                _from != address(asset) &&
-                    _from != address(SENIOR_ASSET) &&
-                    _from != address(SENIOR_VAULT),
-                "wrong from"
-            );
-        }
-        Auction(_auction).enable(_from);
+    /// @notice Public keeper action to kick reward auction for a token.
+    /// @param _token Reward token address to auction.
+    /// @return Auction id returned by the auction contract.
+    function kickAuction(
+        address _token
+    ) external onlyKeepers returns (uint256) {
+        return _kickAuction(_token);
     }
 
     /**
-     * @dev Set the asset to senior oracle address.
-     * @param _assetToSeniorAssetOracle The address of the asset to senior asset oracle.
+     * @dev Kick an auction for a given token.
+     * @param _from The token that was being sold.
      */
-    function setAssetToSeniorAssetOracle(
-        address _assetToSeniorAssetOracle
-    ) external onlyEmergencyAuthorized {
+    function _kickAuction(address _from) internal virtual returns (uint256) {
         require(
-            IOracle(_assetToSeniorAssetOracle).getRate() > 0,
-            "invalid oracle"
+            _from != address(asset) &&
+                _from != address(vault) &&
+                _from != address(SENIOR_VAULT),
+            "cannot kick"
         );
-        assetToSeniorAssetOracle = IOracle(_assetToSeniorAssetOracle);
+        uint256 _balance = ERC20(_from).balanceOf(address(this));
+        ERC20(_from).safeTransfer(rewardAuction, _balance);
+        return Auction(rewardAuction).kick(_from);
     }
 
     /**
@@ -469,6 +468,8 @@ contract Yumbrella is Base4626Compounder {
         collateralRatio = _collateralRatio;
     }
 
+    /// @notice Emergency withdraw hook from base strategy.
+    /// @param _amount Target amount to free.
     function _emergencyWithdraw(uint256 _amount) internal override {
         _freeFunds(Math.min(_amount, vaultsMaxWithdraw()));
     }

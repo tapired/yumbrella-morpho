@@ -1,6 +1,6 @@
 # Yumbrella Morpho
 
-A senior/junior tranche system built on Yearn V3 and Morpho, implementing Design 1: junior vault provides first-loss USDC insurance to protect senior vault depositors.
+A senior/junior tranche system built on Yearn V3 and Morpho. Junior vault (Yumbrella) provides first-loss USDC insurance to protect senior vault depositors. Both senior and junior capital are deployed into the same Morpho compounder for yield.
 
 ## Architecture
 
@@ -27,43 +27,45 @@ A senior/junior tranche system built on Yearn V3 and Morpho, implementing Design
 │   MorphoLossAwareCompounder       │  │           YUMBRELLA               │
 │   (TokenizedStrategy)             │  │      (Base4626Compounder)         │
 │                                   │  │                                   │
-│   Extends MorphoCompounder.       │  │  Three roles on senior vault:     │
-│   Tracks lostAssets() delta from  │  │    • Accountant: fees on profit,  │
-│   MetaMorpho to detect and report │  │      USDC refunds on loss         │
-│   losses before vault level.      │  │    • Deposit limit: caps senior   │
-│                                   │  │      deposits via collateralRatio │
-│   ┌───────────────────────────┐   │  │    • Withdraw limit: blocks       │
-│   │ MorphoCompounder          │   │  │      withdrawals when losses      │
-│   │  • UniswapV3 reward swaps │   │  │      exist                        │
-│   │  • Auction reward sales   │   │  │                                   │
-│   └───────────┬───────────────┘   │  │  Deposits USDC into yield vault.  │
-│               │                   │  │  On profit: receives senior vault  │
-│               ▼                   │  │    shares → redeems to USDC on     │
-│   ┌───────────────────────────┐   │  │    harvest → PPS increases.        │
-│   │  MetaMorpho Vault (ERC4626)│  │  │  On loss: frees USDC from yield   │
-│   │  Allocates across Morpho  │   │  │    vault → refunds senior vault.  │
-│   │  Blue lending markets     │   │  │                                   │
-│   └───────────┬───────────────┘   │  │  Withdraw delay:                  │
-│               │                   │  │    requestWithdraw → 7d cooldown   │
-│               ▼                   │  │    → 7d window to claim            │
-│   ┌───────────────────────────┐   │  └──────────────┬────────────────────┘
-│   │  Morpho Blue (lending)    │   │                 │ USDC
-│   │  Markets with borrowers   │   │                 ▼
-│   └───────────────────────────┘   │  ┌───────────────────────────────────┐
-└───────────────────────────────────┘  │  Yield Vault (e.g. yvUSDC-1)     │
-                                       │  Earns base yield on junior USDC  │
-                                       └───────────────────────────────────┘
+│   Receives USDC from BOTH senior  │  │  vault = MorphoLossAwareCompounder│
+│   vault AND Yumbrella.            │  │                                   │
+│   Deposit allowlisted.            │  │  Three roles on senior vault:     │
+│                                   │  │    • Accountant: fees / refunds   │
+│   Tracks lostAssets() delta from  │  │    • Deposit limit: collateral cap│
+│   MetaMorpho. Also estimates      │  │    • Withdraw limit: loss gate    │
+│   pending losses via on-chain     │  │                                   │
+│   Morpho Blue market math before  │  │  Withdraw delay:                  │
+│   MetaMorpho syncs.               │  │    requestWithdraw → 7d cooldown  │
+│                                   │  │    → 7d window to claim           │
+│   ┌───────────────────────────┐   │  └───────────────┬───────────────────┘
+│   │  MetaMorpho Vault (ERC4626)│  │                  │
+│   │  Allocates across Morpho  │   │                  │ USDC
+│   │  Blue lending markets     │   │                  │
+│   └───────────┬───────────────┘   │  ┌───────────────▼───────────────────┐
+│               ▼                   │  │  Same MorphoLossAwareCompounder   │
+│   ┌───────────────────────────┐   │  │  (Yumbrella deposits here too)    │
+│   │  Morpho Blue (lending)    │   │  └───────────────────────────────────┘
+│   │  Markets with borrowers   │   │
+│   └───────────────────────────┘   │
+└───────────────────────────────────┘
+
+  Both senior and junior USDC flow into the same compounder:
+
+  Senior Vault ──USDC──► MorphoLossAwareCompounder ──► MetaMorpho ──► Morpho Blue
+                              ▲
+  Yumbrella    ──USDC─────────┘
 ```
 
 ### Contracts
 
 | Contract | Base | Description |
 |---|---|---|
-| `Yumbrella.sol` | `Base4626Compounder` | Junior vault. Accountant + deposit/withdraw limit module for senior vault. Deposits USDC into a yield vault. |
-| `MorphoLossAwareCompounder.sol` | `MorphoCompounder` | Senior vault strategy. Tracks Morpho vault losses via `lostAssets()` delta. |
-| `MorphoCompounder.sol` | `Base4626Compounder` + `UniswapV3Swapper` | Base ERC-4626 compounder for Morpho vaults. Handles reward token swapping. |
-| `YumbrellaFactory.sol` | — | Deploys Yumbrella instances with role configuration. |
-| `MorphoLossAwareCompounderFactory.sol` | — | Deploys MorphoLossAwareCompounder instances with role configuration. |
+| `Yumbrella.sol` | `Base4626Compounder` | Junior vault. Accountant + deposit/withdraw limit module for senior vault. Deposits USDC into the MorphoLossAwareCompounder. |
+| `MorphoLossAwareCompounder.sol` | `MorphoCompounder` | Shared strategy. Receives USDC from both senior vault and Yumbrella. Tracks Morpho losses via `lostAssets()` delta and on-chain pending loss estimation. Deposit-allowlisted. |
+| `MorphoCompounder.sol` | `Base4626Compounder` + `UniswapV3Swapper` | Base ERC-4626 compounder for Morpho vaults. Handles reward token swapping via Uniswap V3 or auctions. |
+| `YumbrellaKeeper.sol` | — | Keeper coordinator. Orchestrates report/tend calls across the trio. Chains the full loss-sync flow in a single transaction. |
+| `TrioFactory.sol` | — | One-shot deployment of the full trio (compounder + senior vault + Yumbrella) with all wiring and role setup. |
+| `MinimalMorphoExpectedSupplyLib.sol` | — | On-chain library to estimate expected supply assets per Morpho Blue market. Used by `viewPendingLostAssets()` to detect losses before MetaMorpho syncs. |
 
 ### Default Parameters
 
@@ -74,14 +76,105 @@ A senior/junior tranche system built on Yearn V3 and Morpho, implementing Design
 | `collateralRatio` | 10e18 (10x) |
 | `withdrawCooldown` | 7 days |
 | `withdrawWindow` | 7 days |
+| `yumbrellaLossLimitRatio` | 9,999 (99.99%) |
+| `morphoLossLimitRatio` | 5,000 (50%) |
 
 ### Yumbrella Roles on Senior Vault
 
-**Accountant** — Called by the senior vault during `process_report()`. On profit: returns a 10% performance fee. On loss: frees USDC from the yield vault and refunds the senior vault.
+**Accountant** — Called by the senior vault during `process_report()`. On profit: returns a 10% performance fee (senior vault mints fee shares to Yumbrella). On loss: frees USDC from the compounder and refunds the senior vault.
 
 **Deposit Limit Module** — Caps senior vault deposits at `Yumbrella_vault_value * collateralRatio`. With default 10x ratio: if Yumbrella has $1M deployed, senior can hold up to $10M.
 
 **Withdraw Limit Module** — Blocks all senior vault withdrawals when any strategy has unrealized losses (via `assess_share_of_unrealised_losses`) or unreported Morpho losses (via `lossExists()`).
+
+## Deployment
+
+The `TrioFactory` deploys and wires the full system in a single transaction:
+
+1. Deploys `MorphoLossAwareCompounder`
+2. Deploys senior vault via Yearn V3 `VaultFactory`
+3. Deploys `Yumbrella` (with `yieldVault` = compounder when `yieldVault` param is `address(0)`)
+4. Wires all modules: accountant, deposit/withdraw limits, strategy, auto-allocate
+5. Registers the trio in `YumbrellaKeeper`
+6. Sets deposit allowlist on compounder
+
+```solidity
+(address yumbrella, address compounder, address seniorVault) =
+    trioFactory.deployTrio(TrioFactory.DeployParams({
+        asset: USDC,
+        yieldVault: address(0),       // uses compounder as yield vault
+        morphoVault: metamorphoVault,
+        assetToSeniorOracle: oracle,
+        ...
+    }));
+```
+
+## Keeper Architecture
+
+The `YumbrellaKeeper` contract coordinates all report and tend operations across the trio. It is set as the `keeper` for both strategies and has roles on the senior vault.
+
+```
+                    ┌─────────────────────────────┐
+                    │       YumbrellaKeeper        │
+                    │                              │
+                    │  Authorized keepers call:    │
+                    │    • report()                │ ← full loss-sync
+                    │    • reportYumbrella..       │
+                    │      AndMorpho()             │ ← normal harvest
+                    │    • reportSeniorVault()     │
+                    │    • tendYumbrella()          │
+                    │    • tendMorpho()             │
+                    │    • kickAuction()            │
+                    └──┬──────────┬──────────┬─────┘
+                       │          │          │
+                       ▼          ▼          ▼
+                 Compounder  Senior Vault  Yumbrella
+```
+
+### Off-Chain Monitoring
+
+The off-chain keeper infrastructure only needs to monitor a single on-chain signal:
+
+```
+morphoLossAwareCompounder.tendTrigger()
+```
+
+Under normal operation, this returns `false`. When it returns `true`, a loss has been detected in the Morpho vault. The keeper should then call:
+
+```
+morphoLossAwareCompounder.tend()
+```
+
+This triggers the full automated loss-sync chain:
+
+```
+  morphoLossAwareCompounder.tend()
+     │
+     │  _tend() detects lossExists() == true
+     │  Calls YumbrellaKeeper.report(address(this))
+     ▼
+  YumbrellaKeeper.report() executes in order:
+     │
+     ├── 1. morphoLossAwareCompounder.report()
+     │      Updates loss tracking, reports loss to TokenizedStrategy.
+     │
+     ├── 2. seniorVault.process_report(morphoLossAwareCompounder)
+     │      Senior vault processes loss, calls Yumbrella.report() as
+     │      accountant. Yumbrella frees USDC and refunds senior vault.
+     │
+     └── 3. yumbrella.report()
+            Updates Yumbrella total assets and PPS after loss absorption.
+```
+
+The entire loss detection, reporting, and compensation flow completes atomically in a single transaction. No manual multi-step coordination is required.
+
+For routine profit harvesting, the keeper calls:
+
+```
+yumbrellaKeeper.reportYumbrellaAndMorphoLossAwareCompounder(compounder)
+```
+
+This reports both the compounder and Yumbrella. Senior vault `process_report` is called separately by vault management or via `yumbrellaKeeper.reportSeniorVault()`.
 
 ## Profit Flow
 
@@ -89,116 +182,130 @@ A senior/junior tranche system built on Yearn V3 and Morpho, implementing Design
   1. Morpho Blue markets accrue interest
      │
      ▼
-  2. Keeper calls morphoLossAwareCompounder.report()
-     • vault.deposit(0) syncs MetaMorpho state
-     • _calculateLoss() → no new losses
-     • returns full balance → profit reported to TokenizedStrategy
+  2. Keeper calls keeper.reportYumbrellaAndMorphoLossAwareCompounder()
+     • morphoLossAwareCompounder.report():
+       - vault.deposit(0) syncs MetaMorpho state
+       - _calculateLoss() → no new losses
+       - Returns full balance → profit reported
      │
-     │  profit unlocks over profitMaxUnlockTime (10 days)
+     │  Profit unlocks over profitMaxUnlockTime (10 days)
      ▼
-  3. vaultManagement calls seniorVault.process_report(morphoLossAwareCompounder)
+  3. seniorVault.process_report(morphoLossAwareCompounder)
      • Senior vault sees gain from strategy
-     • Calls Yumbrella.report(gain=X)
-     │
-     ▼
-  4. Yumbrella.report() handles gain
-     • _fees = gain * 10% (seniorVaultPerformanceFee)
-     • Returns _fees to senior vault
+     • Calls Yumbrella.report(gain=X) as accountant
+     • _fees = gain * 10%
      • Senior vault mints fee shares to Yumbrella
      • Senior vault PPS increases (depositors keep 90% of gain)
      │
      ▼
-  5. Keeper calls yumbrella.report()
+  4. yumbrella.report()
      • _harvestAndReport():
-       - super._harvestAndReport() compounds yield vault
-       - Redeems ALL senior vault shares held → receives USDC
-       - _totalAssets += redeemed USDC
+       - super._harvestAndReport() compounds compounder position
+       - Redeems ALL senior vault shares held by Yumbrella → USDC
+       - USDC redeployed into compounder via _deployFunds
+       - _totalAssets increases by redeemed amount
      • Yumbrella PPS increases
-     • All Yumbrella depositors benefit pro-rata (just hold shares)
+     • All Yumbrella depositors benefit pro-rata
 ```
+
+**Profit cycle**: senior vault shares → redeem to USDC → deposit back into compounder. Fee income is realized in-kind and compounded.
 
 ## Loss Flow
 
-### Loss Detection and Blocking
+### Step 1: Loss Detection — Withdrawals Blocked
 
 ```
-  1. Bad debt in Morpho Blue (borrower liquidated, collateral < debt)
+  Bad debt in Morpho Blue (borrower liquidated, collateral < debt)
      │
      ▼
-  2. MetaMorpho lostAssets() increases (once vault state is synced)
+  MorphoLossAwareCompounder.lossExists() → true
      │
-     ▼
-  3. MorphoLossAwareCompounder.lossExists() → true
+     │  Two detection methods:
+     │    1. lostAssets() > lastLostAssetsOnMorpho
+     │       (MetaMorpho already synced)
+     │    2. viewPendingLostAssets() > lostAssets()
+     │       (estimates loss from on-chain Morpho Blue market
+     │        state BEFORE MetaMorpho syncs)
      │
-     ├── available_withdraw_limit → 0 (senior withdrawals blocked)
-     ├── _tendTrigger → false (compounder must report first)
-     └── System waits for compounder to report
+     ├── available_withdraw_limit → 0  (senior withdrawals blocked)
+     └── compounder _tendTrigger → true
 ```
 
-### Loss Reporting and Compensation
+### Step 2: Compounder Tend Triggers Full Loss-Sync
 
 ```
-  4. Keeper calls morphoLossAwareCompounder.report()
-     • vault.deposit(0) syncs MetaMorpho
-     • _calculateLoss():
-         newLosses = (myShares * lostAssetsDelta) / totalSupply
-         lastLostAssetsOnMorpho = current lostAssets (checkpoint updated)
-         lastMorphoLosses += newLosses
-     • Returns max(0, fullBalance - lastMorphoLosses)
-     • Strategy reports loss to TokenizedStrategy
+  Keeper calls morphoLossAwareCompounder.tend()
      │
-     │  Now: lossExists() = false, assess_share_of_unrealised_losses > 0
-     │  _tendTrigger() → true
+     │  _tend() detects lossExists() == true
+     │  Calls YumbrellaKeeper.report(address(this))
      ▼
-  5a. [TEND PATH] Keeper calls yumbrella.tend()
-     • Checks: _loss > 0 AND !_lossExistsOnCompounder
-     • If auction set:
-         - Frees USDC from yield vault
-         - Transfers to auction contract
-         - Kicks auction (asset → SENIOR_ASSET)
-     • Calls keeper.report(yumbrella) to eat the loss on Yumbrella PPS
-     │
-     ▼
-  5b. [DIRECT PATH] vaultManagement calls
-      seniorVault.process_report(morphoLossAwareCompounder)
-     • Senior vault sees loss from strategy
-     • Calls Yumbrella.report(loss=L)
-     │
-     ▼
-  6. Yumbrella.report() handles loss
-     • If auction set: requires auction is filled
-     • _refunds = min(loss * refundRatio, valueOfVault())
-     • _freeFunds(_refunds) → redeems USDC from yield vault
-     • Approves USDC to senior vault
-     │
-     ▼
-  7. Settlement
-     • Senior vault receives USDC refund → PPS stays >= 1.0
-     • Yumbrella absorbs the loss → PPS drops
-     • If loss <= Yumbrella value: senior fully protected
-     • If loss >  Yumbrella value: senior takes excess loss
-     • Withdrawals re-enabled once unrealized losses = 0
+  ┌─────────────────────────────────────────────────────┐
+  │  2a: morphoLossAwareCompounder.report()              │
+  │    • vault.deposit(0) syncs MetaMorpho state          │
+  │    • _calculateLoss(): measures delta of lostAssets()  │
+  │    • Updates lastLostAssetsOnMorpho checkpoint         │
+  │    • Reports loss to TokenizedStrategy                 │
+  │    • Compounder PPS drops                              │
+  └──────────────────────┬──────────────────────────────┘
+                         ▼
+  ┌─────────────────────────────────────────────────────┐
+  │  2b: seniorVault.process_report(compounder)          │
+  │    • Senior vault sees loss from strategy              │
+  │    • Calls Yumbrella.report(loss=L) as accountant      │
+  │    • _refunds = min(loss * 100%, valueOfVault())       │
+  │    • _freeFunds(_refunds) → withdraws USDC from        │
+  │      compounder                                         │
+  │    • Approves USDC to senior vault                      │
+  │    • Senior vault PPS stays >= 1.0                      │
+  └──────────────────────┬──────────────────────────────┘
+                         ▼
+  ┌─────────────────────────────────────────────────────┐
+  │  2c: yumbrella.report()                              │
+  │    • _harvestAndReport() updates total assets          │
+  │    • Redeems any senior vault shares                   │
+  │    • Yumbrella PPS drops (double loss absorbed)        │
+  └─────────────────────────────────────────────────────┘
 ```
 
-### Required Ordering
+### Junior Double Loss
 
-Loss compensation requires strict sequencing. Each step must complete before the next can proceed:
+Because Yumbrella deposits into the same compounder as senior, losses hit junior twice:
 
 ```
-  Step 1: morphoLossAwareCompounder.report()
-          Clears lossExists(), makes unrealized losses visible at vault level.
-          No on-chain trigger exists — keeper must detect independently.
+  Example: $100 senior, $30 junior, 10% Morpho loss
 
-  Step 2: yumbrella.tend() [optional, if auction path needed]
-          Only fires when _loss > 0 AND lossExists() = false.
+  1. Compounder loss: $130 * 10% = $13 total loss
+     Yumbrella's share: ~$3 (proportional to its compounder position)
+     → Yumbrella value drops from $30 to ~$27
 
-  Step 3: seniorVault.process_report(morphoLossAwareCompounder)
-          Triggers Yumbrella.report() callback → USDC refund.
+  2. Senior vault refund: senior lost ~$10 from its position
+     Yumbrella refunds $10 USDC from compounder
+     → Yumbrella value drops from ~$27 to ~$17
+
+  Result: senior stays whole at $100, junior goes from $30 to ~$17
+```
+
+This is by design — junior sells insurance AND is co-invested. Stronger senior protection than pure subordinated exposure because the refund mechanism tops up senior regardless of compounder PPS.
+
+## Loss Detection: Pending Loss Estimation
+
+`MorphoLossAwareCompounder` has two levels of loss detection to minimize the window between bad debt and withdrawal blocking:
+
+**Level 1: `lostAssets()` check** — Compares MetaMorpho's `lostAssets()` against the stored checkpoint. Detects losses after MetaMorpho has synced.
+
+**Level 2: `viewPendingLostAssets()`** — Iterates over MetaMorpho's withdraw queue, computes expected supply assets per market using `MinimalMorphoExpectedSupplyLib` (on-chain Morpho Blue interest accrual math), and compares against `lastTotalAssets - lostAssets`. Detects losses **before MetaMorpho syncs** by reading raw Morpho Blue market state.
+
+```solidity
+function lossExists() public view returns (bool) {
+    uint256 lostAssetsOnMorpho = IMetaMorpho(address(vault)).lostAssets();
+    if (lostAssetsOnMorpho > lastLostAssetsOnMorpho) return true;
+    return viewPendingLostAssets() > lostAssetsOnMorpho;
+}
 ```
 
 ## Morpho Loss Tracking
 
-The `MorphoLossAwareCompounder` tracks losses via MetaMorpho's `lostAssets()` — a monotonically increasing counter of cumulative bad debt.
+The `MorphoLossAwareCompounder` tracks realized losses via MetaMorpho's `lostAssets()` — a monotonically increasing counter of cumulative bad debt.
 
 ```
 State variables:
@@ -222,7 +329,7 @@ The checkpoint update (step 4) ensures each `lostAssets()` increment is only cou
 
 Governed by `available_withdraw_limit()`. Returns `type(uint256).max` (unlimited) when no losses detected. Returns `0` (fully blocked) when any strategy has:
 - `assess_share_of_unrealised_losses != 0` (loss reported by strategy but not yet processed by vault), OR
-- `lossExists() == true` (loss detected in Morpho but not yet reported by strategy)
+- `lossExists() == true` (loss detected in Morpho, including pending unreported losses)
 
 ### Yumbrella (Junior) Withdrawals
 
@@ -255,6 +362,8 @@ available_deposit_limit = maxSeniorDeposits - seniorVault.totalAssets()
 
 With default 10x ratio, $1M of Yumbrella capital supports up to $10M in senior deposits.
 
+The MorphoLossAwareCompounder uses an allowlist (`allowed` mapping) to restrict deposits to the senior vault and Yumbrella only.
+
 ## How to Build and Test
 
 ### Requirements
@@ -284,4 +393,4 @@ make coverage       # Generate test coverage
 make coverage-html  # Generate HTML coverage report
 ```
 
-Tests run against a mainnet fork using real USDC, yvUSDC-1, and Morpho vault contracts.
+Tests run against a mainnet fork using real USDC and Morpho vault contracts.

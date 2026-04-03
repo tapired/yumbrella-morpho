@@ -1,139 +1,287 @@
-# Tokenized Strategy Mix for Yearn V3 strategies
+# Yumbrella Morpho
 
-This repo will allow you to write, test and deploy V3 "Tokenized Strategies" using [Foundry](https://book.getfoundry.sh/).
+A senior/junior tranche system built on Yearn V3 and Morpho, implementing Design 1: junior vault provides first-loss USDC insurance to protect senior vault depositors.
 
-You will only need to override the three functions in Strategy.sol of `_deployFunds`, `_freeFunds` and `_harvestAndReport`. With the option to also override `_tend`, `_tendTrigger`, `availableDepositLimit`, `availableWithdrawLimit` and `_emergencyWithdraw` if desired.
+## Architecture
 
-For a more complete overview of how the Tokenized Strategies work please visit the [TokenizedStrategy Repo](https://github.com/yearn/tokenized-strategy).
+```
+                         ┌─────────────────────────────────────────┐
+                         │         SENIOR VAULT (VaultV3.vy)       │
+                         │         asset: USDC                     │
+                         │                                         │
+                         │  Modules (all set to Yumbrella):        │
+                         │    ├── accountant                       │
+                         │    ├── deposit_limit_module              │
+                         │    └── withdraw_limit_module             │
+                         │                                         │
+                         │  auto_allocate: true                    │
+                         │  use_default_queue: true                │
+                         │                                         │
+                         │  Strategy:                              │
+                         │    └── MorphoLossAwareCompounder        │
+                         └──────┬──────────────────┬───────────────┘
+                                │                  │
+                   USDC (auto)  │                  │ process_report()
+                                ▼                  ▼
+┌───────────────────────────────────┐  ┌───────────────────────────────────┐
+│   MorphoLossAwareCompounder       │  │           YUMBRELLA               │
+│   (TokenizedStrategy)             │  │      (Base4626Compounder)         │
+│                                   │  │                                   │
+│   Extends MorphoCompounder.       │  │  Three roles on senior vault:     │
+│   Tracks lostAssets() delta from  │  │    • Accountant: fees on profit,  │
+│   MetaMorpho to detect and report │  │      USDC refunds on loss         │
+│   losses before vault level.      │  │    • Deposit limit: caps senior   │
+│                                   │  │      deposits via collateralRatio │
+│   ┌───────────────────────────┐   │  │    • Withdraw limit: blocks       │
+│   │ MorphoCompounder          │   │  │      withdrawals when losses      │
+│   │  • UniswapV3 reward swaps │   │  │      exist                        │
+│   │  • Auction reward sales   │   │  │                                   │
+│   └───────────┬───────────────┘   │  │  Deposits USDC into yield vault.  │
+│               │                   │  │  On profit: receives senior vault  │
+│               ▼                   │  │    shares → redeems to USDC on     │
+│   ┌───────────────────────────┐   │  │    harvest → PPS increases.        │
+│   │  MetaMorpho Vault (ERC4626)│  │  │  On loss: frees USDC from yield   │
+│   │  Allocates across Morpho  │   │  │    vault → refunds senior vault.  │
+│   │  Blue lending markets     │   │  │                                   │
+│   └───────────┬───────────────┘   │  │  Withdraw delay:                  │
+│               │                   │  │    requestWithdraw → 7d cooldown   │
+│               ▼                   │  │    → 7d window to claim            │
+│   ┌───────────────────────────┐   │  └──────────────┬────────────────────┘
+│   │  Morpho Blue (lending)    │   │                 │ USDC
+│   │  Markets with borrowers   │   │                 ▼
+│   └───────────────────────────┘   │  ┌───────────────────────────────────┐
+└───────────────────────────────────┘  │  Yield Vault (e.g. yvUSDC-1)     │
+                                       │  Earns base yield on junior USDC  │
+                                       └───────────────────────────────────┘
+```
 
-## How to start
+### Contracts
+
+| Contract | Base | Description |
+|---|---|---|
+| `Yumbrella.sol` | `Base4626Compounder` | Junior vault. Accountant + deposit/withdraw limit module for senior vault. Deposits USDC into a yield vault. |
+| `MorphoLossAwareCompounder.sol` | `MorphoCompounder` | Senior vault strategy. Tracks Morpho vault losses via `lostAssets()` delta. |
+| `MorphoCompounder.sol` | `Base4626Compounder` + `UniswapV3Swapper` | Base ERC-4626 compounder for Morpho vaults. Handles reward token swapping. |
+| `YumbrellaFactory.sol` | — | Deploys Yumbrella instances with role configuration. |
+| `MorphoLossAwareCompounderFactory.sol` | — | Deploys MorphoLossAwareCompounder instances with role configuration. |
+
+### Default Parameters
+
+| Parameter | Value |
+|---|---|
+| `seniorVaultPerformanceFee` | 1,000 (10%) |
+| `refundRatio` | 10,000 (100%) |
+| `collateralRatio` | 10e18 (10x) |
+| `withdrawCooldown` | 7 days |
+| `withdrawWindow` | 7 days |
+
+### Yumbrella Roles on Senior Vault
+
+**Accountant** — Called by the senior vault during `process_report()`. On profit: returns a 10% performance fee. On loss: frees USDC from the yield vault and refunds the senior vault.
+
+**Deposit Limit Module** — Caps senior vault deposits at `Yumbrella_vault_value * collateralRatio`. With default 10x ratio: if Yumbrella has $1M deployed, senior can hold up to $10M.
+
+**Withdraw Limit Module** — Blocks all senior vault withdrawals when any strategy has unrealized losses (via `assess_share_of_unrealised_losses`) or unreported Morpho losses (via `lossExists()`).
+
+## Profit Flow
+
+```
+  1. Morpho Blue markets accrue interest
+     │
+     ▼
+  2. Keeper calls morphoLossAwareCompounder.report()
+     • vault.deposit(0) syncs MetaMorpho state
+     • _calculateLoss() → no new losses
+     • returns full balance → profit reported to TokenizedStrategy
+     │
+     │  profit unlocks over profitMaxUnlockTime (10 days)
+     ▼
+  3. vaultManagement calls seniorVault.process_report(morphoLossAwareCompounder)
+     • Senior vault sees gain from strategy
+     • Calls Yumbrella.report(gain=X)
+     │
+     ▼
+  4. Yumbrella.report() handles gain
+     • _fees = gain * 10% (seniorVaultPerformanceFee)
+     • Returns _fees to senior vault
+     • Senior vault mints fee shares to Yumbrella
+     • Senior vault PPS increases (depositors keep 90% of gain)
+     │
+     ▼
+  5. Keeper calls yumbrella.report()
+     • _harvestAndReport():
+       - super._harvestAndReport() compounds yield vault
+       - Redeems ALL senior vault shares held → receives USDC
+       - _totalAssets += redeemed USDC
+     • Yumbrella PPS increases
+     • All Yumbrella depositors benefit pro-rata (just hold shares)
+```
+
+## Loss Flow
+
+### Loss Detection and Blocking
+
+```
+  1. Bad debt in Morpho Blue (borrower liquidated, collateral < debt)
+     │
+     ▼
+  2. MetaMorpho lostAssets() increases (once vault state is synced)
+     │
+     ▼
+  3. MorphoLossAwareCompounder.lossExists() → true
+     │
+     ├── available_withdraw_limit → 0 (senior withdrawals blocked)
+     ├── _tendTrigger → false (compounder must report first)
+     └── System waits for compounder to report
+```
+
+### Loss Reporting and Compensation
+
+```
+  4. Keeper calls morphoLossAwareCompounder.report()
+     • vault.deposit(0) syncs MetaMorpho
+     • _calculateLoss():
+         newLosses = (myShares * lostAssetsDelta) / totalSupply
+         lastLostAssetsOnMorpho = current lostAssets (checkpoint updated)
+         lastMorphoLosses += newLosses
+     • Returns max(0, fullBalance - lastMorphoLosses)
+     • Strategy reports loss to TokenizedStrategy
+     │
+     │  Now: lossExists() = false, assess_share_of_unrealised_losses > 0
+     │  _tendTrigger() → true
+     ▼
+  5a. [TEND PATH] Keeper calls yumbrella.tend()
+     • Checks: _loss > 0 AND !_lossExistsOnCompounder
+     • If auction set:
+         - Frees USDC from yield vault
+         - Transfers to auction contract
+         - Kicks auction (asset → SENIOR_ASSET)
+     • Calls keeper.report(yumbrella) to eat the loss on Yumbrella PPS
+     │
+     ▼
+  5b. [DIRECT PATH] vaultManagement calls
+      seniorVault.process_report(morphoLossAwareCompounder)
+     • Senior vault sees loss from strategy
+     • Calls Yumbrella.report(loss=L)
+     │
+     ▼
+  6. Yumbrella.report() handles loss
+     • If auction set: requires auction is filled
+     • _refunds = min(loss * refundRatio, valueOfVault())
+     • _freeFunds(_refunds) → redeems USDC from yield vault
+     • Approves USDC to senior vault
+     │
+     ▼
+  7. Settlement
+     • Senior vault receives USDC refund → PPS stays >= 1.0
+     • Yumbrella absorbs the loss → PPS drops
+     • If loss <= Yumbrella value: senior fully protected
+     • If loss >  Yumbrella value: senior takes excess loss
+     • Withdrawals re-enabled once unrealized losses = 0
+```
+
+### Required Ordering
+
+Loss compensation requires strict sequencing. Each step must complete before the next can proceed:
+
+```
+  Step 1: morphoLossAwareCompounder.report()
+          Clears lossExists(), makes unrealized losses visible at vault level.
+          No on-chain trigger exists — keeper must detect independently.
+
+  Step 2: yumbrella.tend() [optional, if auction path needed]
+          Only fires when _loss > 0 AND lossExists() = false.
+
+  Step 3: seniorVault.process_report(morphoLossAwareCompounder)
+          Triggers Yumbrella.report() callback → USDC refund.
+```
+
+## Morpho Loss Tracking
+
+The `MorphoLossAwareCompounder` tracks losses via MetaMorpho's `lostAssets()` — a monotonically increasing counter of cumulative bad debt.
+
+```
+State variables:
+  lastLostAssetsOnMorpho  — checkpoint from last report
+  lastMorphoLosses        — cumulative losses attributed to this strategy
+
+On each _harvestAndReport():
+  1. vault.deposit(0) forces MetaMorpho state sync
+  2. delta = lostAssets() - lastLostAssetsOnMorpho
+  3. newLosses = (myShares * delta) / totalSupply
+  4. lastLostAssetsOnMorpho = lostAssets()   ← checkpoint updated
+  5. lastMorphoLosses += newLosses
+  6. return max(0, fullBalance - lastMorphoLosses)
+```
+
+The checkpoint update (step 4) ensures each `lostAssets()` increment is only counted once. Subsequent reports with no new bad debt produce `delta = 0` and no additional loss.
+
+## Withdrawal Mechanisms
+
+### Senior Vault Withdrawals
+
+Governed by `available_withdraw_limit()`. Returns `type(uint256).max` (unlimited) when no losses detected. Returns `0` (fully blocked) when any strategy has:
+- `assess_share_of_unrealised_losses != 0` (loss reported by strategy but not yet processed by vault), OR
+- `lossExists() == true` (loss detected in Morpho but not yet reported by strategy)
+
+### Yumbrella (Junior) Withdrawals
+
+Two-phase withdrawal with cooldown:
+
+```
+  1. User calls requestWithdraw(shares)
+     • Records share count and unlock timestamp
+     • Cooldown: 7 days
+
+  2. After cooldown, within 7-day window:
+     • availableWithdrawLimit returns min(requestedAssets, available liquidity)
+     • User calls withdraw/redeem
+
+  3. If window expires without withdrawal:
+     • User must call requestWithdraw again
+```
+
+Users continue earning yield (and remain exposed to slashing) during the cooldown period.
+
+## Deposit Limits
+
+Senior vault deposits are capped by the collateral ratio:
+
+```
+maxSeniorDeposits = Yumbrella.valueOfVault() * collateralRatio
+
+available_deposit_limit = maxSeniorDeposits - seniorVault.totalAssets()
+```
+
+With default 10x ratio, $1M of Yumbrella capital supports up to $10M in senior deposits.
+
+## How to Build and Test
 
 ### Requirements
 
-- First you will need to install [Foundry](https://book.getfoundry.sh/getting-started/installation).
-NOTE: If you are on a windows machine it is recommended to use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install)
-- Install [Node.js](https://nodejs.org/en/download/package-manager/)
+- [Foundry](https://book.getfoundry.sh/getting-started/installation)
+- [Node.js](https://nodejs.org/en/download/package-manager/)
 
-### Clone this repository
+### Setup
 
 ```sh
-git clone --recursive https://github.com/yearn/tokenized-strategy-foundry-mix
-
-cd tokenized-strategy-foundry-mix
-
+git clone --recursive <repo-url>
+cd yumbrella-morpho
 yarn
 ```
 
-### Set your environment Variables
+### Environment
 
-Use the `.env.example` template to create a `.env` file and store the environement variables. You will need to populate the `RPC_URL` for the desired network(s). RPC url can be obtained from various providers, including [Ankr](https://www.ankr.com/rpc/) (no sign-up required) and [Infura](https://infura.io/).
+Copy `.env.example` to `.env` and set `ETH_RPC_URL` (mainnet fork required for tests).
 
-Use .env file
-
-1. Make a copy of `.env.example`
-2. Add the value for `ETH_RPC_URL` and other example vars
-     NOTE: If you set up a global environment variable, that will take precedence.
-
-### Build the project
+### Commands
 
 ```sh
-make build
+make build          # Compile contracts
+make test           # Run tests
+make trace          # Run tests with traces
+make coverage       # Generate test coverage
+make coverage-html  # Generate HTML coverage report
 ```
 
-Run tests
-
-```sh
-make test
-```
-
-## Strategy Writing
-
-For a complete guide to creating a Tokenized Strategy please visit: https://docs.yearn.fi/developers/v3/strategy_writing_guide
-
-NOTE: Compiler defaults to 8.23 but it can be adjusted in the foundry toml.
-
-## Testing
-
-Due to the nature of the BaseStrategy utilizing an external contract for the majority of its logic, the default interface for any tokenized strategy will not allow proper testing of all functions. Testing of your Strategy should utilize the pre-built [IStrategyInterface](https://github.com/yearn/tokenized-strategy-foundry-mix/blob/master/src/interfaces/IStrategyInterface.sol) to cast any deployed strategy through for testing, as seen in the Setup example. You can add any external functions that you add for your specific strategy to this interface to be able to test all functions with one variable.
-
-Example:
-
-```solidity
-Strategy _strategy = new Strategy(asset, name);
-IStrategyInterface strategy =  IStrategyInterface(address(_strategy));
-```
-
-Due to the permissionless nature of the tokenized Strategies, all tests are written without integration with any meta vault funding it. While those tests can be added, all V3 vaults utilize the ERC-4626 standard for deposit/withdraw and accounting, so they can be plugged in easily to any number of different vaults with the same `asset.`
-
-Tests run in fork environment, you need to complete the full installation and setup to be able to run these commands.
-
-```sh
-make test
-```
-
-Run tests with traces (very useful)
-
-```sh
-make trace
-```
-
-Run specific test contract (e.g. `test/StrategyOperation.t.sol`)
-
-```sh
-make test-contract contract=StrategyOperationsTest
-```
-
-Run specific test contract with traces (e.g. `test/StrategyOperation.t.sol`)
-
-```sh
-make trace-contract contract=StrategyOperationsTest
-```
-
-See here for some tips on testing [`Testing Tips`](https://book.getfoundry.sh/forge/tests.html)
-
-When testing on chains other than mainnet you will need to make sure a valid `CHAIN_RPC_URL` for that chain is set in your .env. You will then need to simply adjust the variable that RPC_URL is set to in the Makefile to match your chain.
-
-To update to a new API version of the TokenizeStrategy you will need to simply remove and reinstall the dependency.
-
-### Test Coverage
-
-Run the following command to generate a test coverage:
-
-```sh
-make coverage
-```
-
-To generate test coverage report in HTML, you need to have installed [`lcov`](https://github.com/linux-test-project/lcov) and run:
-
-```sh
-make coverage-html
-```
-
-The generated report will be in `coverage-report/index.html`.
-
-### Deployment
-
-#### Contract Verification
-
-Once the Strategy is fully deployed and verified, you will need to verify the TokenizedStrategy functions. To do this, navigate to the /#code page on Etherscan.
-
-1. Click on the `More Options` drop-down menu
-2. Click "is this a proxy?"
-3. Click the "Verify" button
-4. Click "Save"
-
-This should add all of the external `TokenizedStrategy` functions to the contract interface on Etherscan.
-
-## CI
-
-This repo uses [GitHub Actions](.github/workflows) for CI. There are three workflows: lint, test and slither for static analysis.
-
-To enable test workflow you need to add the `ETH_RPC_URL` secret to your repo. For more info see [GitHub Actions docs](https://docs.github.com/en/codespaces/managing-codespaces-for-your-organization/managing-encrypted-secrets-for-your-repository-and-organization-for-github-codespaces#adding-secrets-for-a-repository).
-
-If the slither finds some issues that you want to suppress, before the issue add comment: `//slither-disable-next-line DETECTOR_NAME`. For more info about detectors see [Slither docs](https://github.com/crytic/slither/wiki/Detector-Documentation).
-
-### Coverage
-
-If you want to use [`coverage.yml`](.github/workflows/coverage.yml) workflow on other chains than mainnet, you need to add the additional `CHAIN_RPC_URL` secret.
-
-Coverage workflow will generate coverage summary and attach it to PR as a comment. To enable this feature you need to add the [`GH_TOKEN`](.github/workflows/coverage.yml#L53) secret to your Github repo. Token must have permission to "Read and Write access to pull requests". To generate token go to [Github settings page](https://github.com/settings/tokens?type=beta). For more info see [GitHub Access Tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
+Tests run against a mainnet fork using real USDC, yvUSDC-1, and Morpho vault contracts.

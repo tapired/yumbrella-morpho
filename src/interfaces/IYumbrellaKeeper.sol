@@ -1,6 +1,7 @@
 pragma solidity ^0.8.18;
 
 interface IYumbrellaKeeper {
+    function setManager(address _manager, bool _status) external;
     function setKeeper(address _keeper, bool _status) external;
     function setTrio(
         address _yumbrella,

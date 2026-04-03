@@ -1,21 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.18;
 
-import {Governance} from "@periphery/utils/Governance.sol";
 import {IYumbrella} from "./interfaces/IYumbrella.sol";
 import {IMorphoLossAwareCompounder} from "./interfaces/IMorphoLossAwareCompounder.sol";
 import {IVault} from "@yearn-vaults/interfaces/IVault.sol";
 
-contract YumbrellaKeeper is Governance {
+contract YumbrellaKeeper {
     /// @notice Initializes keeper governance.
-    /// @param _governance Address allowed to configure keepers and trios.
-    constructor(address _governance) Governance(_governance) {}
+    /// @param _manager Address allowed to configure keepers and trios.
+    constructor(address _manager) {
+        managers[_manager] = true;
+    }
 
     struct Trio {
         address yumbrella;
         address seniorVault;
     }
 
+    mapping(address => bool) public managers;
     mapping(address => Trio) public trios;
     mapping(address => bool) public keepers;
 
@@ -24,10 +26,15 @@ contract YumbrellaKeeper is Governance {
         _;
     }
 
+    modifier onlyManager() {
+        require(managers[msg.sender], "!manager");
+        _;
+    }
+
     /// @notice Sets or unsets an address as an authorized keeper.
     /// @param _keeper Keeper address.
     /// @param _status True to allow, false to revoke.
-    function setKeeper(address _keeper, bool _status) external onlyGovernance {
+    function setKeeper(address _keeper, bool _status) external onlyManager {
         keepers[_keeper] = _status;
     }
 
@@ -39,7 +46,7 @@ contract YumbrellaKeeper is Governance {
         address _yumbrella,
         address _morphoLossAwareCompounder,
         address _seniorVault
-    ) external onlyGovernance {
+    ) external onlyManager {
         trios[_morphoLossAwareCompounder] = Trio(_yumbrella, _seniorVault);
     }
 
@@ -142,5 +149,21 @@ contract YumbrellaKeeper is Governance {
         address _morphoLossAwareCompounder
     ) external onlyKeeper(msg.sender) {
         IMorphoLossAwareCompounder(_morphoLossAwareCompounder).tend();
+    }
+
+    /// @notice Keeper action to kick reward auction for a token since this address is the keeper
+    /// @param _strategy Morpho loss aware compounder or yumbrella address 
+    /// @param _token Reward token address to auction.
+    /// @return Auction Amount kicked by the auction contract.
+    function kickAuction(address _strategy, address _token) external onlyKeeper(msg.sender) returns (uint256) {
+        // same interface as Yumbrella
+        return IMorphoLossAwareCompounder(_strategy).kickAuction(_token);
+    }
+
+    /// @notice Sets or unsets an address as an authorized manager.
+    /// @param _manager Manager address.
+    /// @param _status True to allow, false to revoke.
+    function setManager(address _manager, bool _status) external onlyManager {
+        managers[_manager] = _status;
     }
 }

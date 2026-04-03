@@ -7,4 +7,6 @@ interface IMorphoLossAwareCompounder is IStrategy, IBase4626Compounder {
     function lossExists() external view returns (bool);
 
     function setAllowed(address _allowed, bool _status) external;
+
+    function kickAuction(address _token) external returns (uint256);
 }

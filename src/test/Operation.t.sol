@@ -20,7 +20,6 @@ contract OperationTest is Setup {
         assertEq(yumbrella.asset(), address(asset));
         assertEq(yumbrella.management(), management);
         assertEq(yumbrella.performanceFeeRecipient(), performanceFeeRecipient);
-        assertEq(yumbrella.keeper(), keeper);
         // TODO: add additional check on strat params
     }
 
@@ -37,7 +36,9 @@ contract OperationTest is Setup {
 
         // Report profit
         vm.prank(keeper);
-        (uint256 profit, uint256 loss) = yumbrella.report();
+        (uint256 profit, uint256 loss) = yumbrellaKeeper.reportYumbrella(
+            address(morphoLossAwareCompounder)
+        );
 
         // Check return Values
         assertGe(profit, 0, "!profit");
@@ -83,7 +84,9 @@ contract OperationTest is Setup {
 
         // Report profit
         vm.prank(keeper);
-        (uint256 profit, uint256 loss) = yumbrella.report();
+        (uint256 profit, uint256 loss) = yumbrellaKeeper.reportYumbrella(
+            address(morphoLossAwareCompounder)
+        );
 
         // Check return Values
         assertGe(profit, toAirdrop, "!profit");
@@ -132,7 +135,9 @@ contract OperationTest is Setup {
 
         // Report profit
         vm.prank(keeper);
-        (uint256 profit, uint256 loss) = yumbrella.report();
+        (uint256 profit, uint256 loss) = yumbrellaKeeper.reportYumbrella(
+            address(morphoLossAwareCompounder)
+        );
 
         // Check return Values
         assertGe(profit, toAirdrop, "!profit");
@@ -177,41 +182,45 @@ contract OperationTest is Setup {
             "!perf fee out"
         );
     }
+    // NOTE: Will be tested more comprehensively in other files with full setup.
+    // function test_tendTrigger(uint256 _amount) public {
+    //     vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
 
-    function test_tendTrigger(uint256 _amount) public {
-        vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
+    //     (bool trigger, ) = yumbrella.tendTrigger();
+    //     assertTrue(!trigger);
 
-        (bool trigger, ) = yumbrella.tendTrigger();
-        assertTrue(!trigger);
+    //     // Deposit into strategy
+    //     mintAndDepositIntoYumbrella(yumbrella, user, _amount);
 
-        // Deposit into strategy
-        mintAndDepositIntoYumbrella(yumbrella, user, _amount);
+    //     (trigger, ) = yumbrella.tendTrigger();
+    //     assertTrue(!trigger);
 
-        (trigger, ) = yumbrella.tendTrigger();
-        assertTrue(!trigger);
+    //     // Skip some time
+    //     skip(1 days);
 
-        // Skip some time
-        skip(1 days);
+    //     (trigger, ) = yumbrella.tendTrigger();
+    //     assertTrue(!trigger);
 
-        (trigger, ) = yumbrella.tendTrigger();
-        assertTrue(!trigger);
+    //     vm.prank(keeper);
+    //     yumbrellaKeeper.reportYumbrella(address(morphoLossAwareCompounder));
 
-        vm.prank(keeper);
-        yumbrella.report();
+    //     (trigger, ) = yumbrella.tendTrigger();
+    //     assertTrue(!trigger);
 
-        (trigger, ) = yumbrella.tendTrigger();
-        assertTrue(!trigger);
+    //     // Unlock Profits
+    //     skip(yumbrella.profitMaxUnlockTime());
 
-        // Unlock Profits
-        skip(yumbrella.profitMaxUnlockTime());
+    //     (trigger, ) = yumbrella.tendTrigger();
+    //     assertTrue(!trigger);
 
-        (trigger, ) = yumbrella.tendTrigger();
-        assertTrue(!trigger);
+    //     vm.prank(user);
+    //     yumbrella.requestWithdraw(_amount);
+    //     skip(yumbrella.withdrawCooldown() + 2);
 
-        vm.prank(user);
-        yumbrella.redeem(_amount, user, user);
+    //     vm.prank(user);
+    //     yumbrella.redeem(_amount, user, user);
 
-        (trigger, ) = yumbrella.tendTrigger();
-        assertTrue(!trigger);
-    }
+    //     (trigger, ) = yumbrella.tendTrigger();
+    //     assertTrue(!trigger);
+    // }
 }

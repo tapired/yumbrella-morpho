@@ -12,7 +12,8 @@ import {MorphoLossAwareCompounderFactory} from "../../MorphoLossAwareCompounderF
 import {YumbrellaFactory} from "../../YumbrellaFactory.sol";
 import {IYumbrella} from "../../interfaces/IYumbrella.sol";
 import {IVaultFactory} from "@yearn-vaults/interfaces/IVaultFactory.sol";
-
+import {YumbrellaKeeper} from "../../YumbrellaKeeper.sol";
+import {IYumbrellaKeeper} from "../../interfaces/IYumbrellaKeeper.sol";
 import {MockOracle} from "../Mocks/MockOracle.sol";
 import {Clonable} from "@periphery/utils/Clonable.sol";
 
@@ -43,6 +44,7 @@ contract Setup is ExtendedTest, IEvents, Clonable {
     IVault public seniorVault;
     ERC20 public seniorVaultAsset;
     IOracle public assetToSeniorOracle;
+    IYumbrellaKeeper public yumbrellaKeeper;
 
     VyperDeployer public vyperDeployer = new VyperDeployer();
 
@@ -86,17 +88,23 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         // Set decimals
         decimals = asset.decimals();
 
+        yumbrellaKeeper = IYumbrellaKeeper(
+            address(new YumbrellaKeeper(management))
+        );
+        vm.prank(management);
+        yumbrellaKeeper.setKeeper(keeper, true);
+
         yumbrellaFactory = new YumbrellaFactory(
             management,
             performanceFeeRecipient,
-            keeper,
+            address(yumbrellaKeeper),
             emergencyAdmin
         );
 
         morphoLossAwareCompounderFactory = new MorphoLossAwareCompounderFactory(
             management,
             performanceFeeRecipient,
-            keeper,
+            address(yumbrellaKeeper),
             emergencyAdmin
         );
 
@@ -108,6 +116,13 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         // Deploy strategy and set variables
         yumbrella = IYumbrella(
             setUpYumbrella(address(seniorVault), address(assetToSeniorOracle))
+        );
+
+        vm.prank(management);
+        yumbrellaKeeper.setTrio(
+            address(yumbrella),
+            address(morphoLossAwareCompounder),
+            address(seniorVault)
         );
 
         factory = yumbrella.FACTORY();
@@ -156,6 +171,10 @@ contract Setup is ExtendedTest, IEvents, Clonable {
         vm.prank(management);
         // Give the vault manager all the roles
         IVault(_vault).set_role(vaultManagement, Roles.ALL);
+
+        vm.prank(management);
+        // YumbrellaKeeper executes process_report via helper methods.
+        IVault(_vault).set_role(address(yumbrellaKeeper), Roles.ALL);
 
         vm.prank(vaultManagement);
         IVault(_vault).set_deposit_limit(type(uint256).max);

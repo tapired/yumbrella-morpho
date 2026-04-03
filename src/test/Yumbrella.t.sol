@@ -428,15 +428,18 @@ contract YumbrellaTest is Setup {
         skip(2 days); // simulate interest earnings
 
         vm.prank(keeper);
-        (uint256 profit, uint256 loss) = morphoLossAwareCompounder.report();
+        (uint256 profit, uint256 loss) = yumbrellaKeeper
+            .reportMorphoLossAwareCompounder(
+                address(morphoLossAwareCompounder)
+            );
         assertGe(profit, 0, "!profit");
         assertEq(loss, 0, "!loss");
         console2.log("profit", profit);
 
         skip(morphoLossAwareCompounder.profitMaxUnlockTime());
 
-        vm.prank(vaultManagement);
-        (profit, loss) = seniorVault.process_report(
+        vm.prank(keeper);
+        (profit, loss) = yumbrellaKeeper.reportSeniorVault(
             address(morphoLossAwareCompounder)
         );
         assertGe(profit, 0, "!profit");
@@ -496,7 +499,10 @@ contract YumbrellaTest is Setup {
 
         // now report on the morpho loss aware compounder make sure loss there.
         vm.prank(keeper);
-        (uint256 profit, uint256 loss) = morphoLossAwareCompounder.report();
+        (uint256 profit, uint256 loss) = yumbrellaKeeper
+            .reportMorphoLossAwareCompounder(
+                address(morphoLossAwareCompounder)
+            );
         assertEq(profit, 0, "!profit");
         assertGt(loss, 0, "!loss");
         console2.log("loss on morpho loss aware compounder", loss);
@@ -507,8 +513,8 @@ contract YumbrellaTest is Setup {
         seniorVault.redeem(_amount, user, user);
 
         // now report on senior vault
-        vm.prank(vaultManagement);
-        (profit, loss) = seniorVault.process_report(
+        vm.prank(keeper);
+        (profit, loss) = yumbrellaKeeper.reportSeniorVault(
             address(morphoLossAwareCompounder)
         );
         assertEq(profit, 0, "!profit");
@@ -527,7 +533,9 @@ contract YumbrellaTest is Setup {
 
         // report on yumbrella make sure there are losses on the yumbrella
         vm.prank(keeper);
-        (profit, loss) = yumbrella.report();
+        (profit, loss) = yumbrellaKeeper.reportYumbrella(
+            address(morphoLossAwareCompounder)
+        );
         assertEq(profit, 0, "!profit");
         assertGt(loss, 0, "!loss");
         console2.log("loss on yumbrella", loss);
@@ -588,13 +596,16 @@ contract YumbrellaTest is Setup {
 
         // now report on the morpho loss aware compounder make sure loss there.
         vm.prank(keeper);
-        (uint256 profit, uint256 loss) = morphoLossAwareCompounder.report();
+        (uint256 profit, uint256 loss) = yumbrellaKeeper
+            .reportMorphoLossAwareCompounder(
+                address(morphoLossAwareCompounder)
+            );
         assertEq(profit, 0, "!profit");
         assertGt(loss, 0, "!loss");
 
         // now report on senior vault
-        vm.prank(vaultManagement);
-        (profit, loss) = seniorVault.process_report(
+        vm.prank(keeper);
+        (profit, loss) = yumbrellaKeeper.reportSeniorVault(
             address(morphoLossAwareCompounder)
         );
         assertEq(profit, 0, "!profit");
@@ -602,7 +613,9 @@ contract YumbrellaTest is Setup {
 
         // now repor ton yumbrella
         vm.prank(keeper);
-        (profit, loss) = yumbrella.report();
+        (profit, loss) = yumbrellaKeeper.reportYumbrella(
+            address(morphoLossAwareCompounder)
+        );
         assertEq(profit, 0, "!profit");
         assertGt(loss, 0, "!loss");
 
@@ -621,7 +634,9 @@ contract YumbrellaTest is Setup {
         // now let's make some profits
         skip(86400 * 5);
         vm.prank(keeper);
-        (profit, loss) = morphoLossAwareCompounder.report();
+        (profit, loss) = yumbrellaKeeper.reportMorphoLossAwareCompounder(
+            address(morphoLossAwareCompounder)
+        );
         assertGe(profit, 0, "!profit");
         assertEq(loss, 0, "!loss");
         console2.log("morpho loss aware compounder profit", profit);
@@ -630,8 +645,8 @@ contract YumbrellaTest is Setup {
         assertGe(morphoLossAwareCompounder.pricePerShare(), morphoPps, "!pps");
 
         // report on senior vault
-        vm.prank(vaultManagement);
-        (profit, loss) = seniorVault.process_report(
+        vm.prank(keeper);
+        (profit, loss) = yumbrellaKeeper.reportSeniorVault(
             address(morphoLossAwareCompounder)
         );
         assertGe(profit, 0, "!profit");
@@ -644,7 +659,9 @@ contract YumbrellaTest is Setup {
 
         // report on yumbrella
         vm.prank(keeper);
-        (profit, loss) = yumbrella.report();
+        (profit, loss) = yumbrellaKeeper.reportYumbrella(
+            address(morphoLossAwareCompounder)
+        );
         assertGe(profit, 0, "!profit");
         assertEq(loss, 0, "!loss");
         console2.log("yumbrella profit", profit);

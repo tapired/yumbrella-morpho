@@ -30,6 +30,10 @@ interface IMetaMorpho {
     function lastTotalAssets() external view returns (uint256);
 }
 
+interface IKeeper {
+    function report(address _strategy) external returns (uint256, uint256);
+}
+
 contract MorphoLossAwareCompounder is MorphoCompounder {
     using SafeERC20 for ERC20;
     using MinimalMorphoExpectedSupplyLib for IMorphoLike;
@@ -90,7 +94,7 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
         }
     }
 
-    function lossExists() external view returns (bool) {
+    function lossExists() public view returns (bool) {
         uint256 lostAssetsOnMorpho = IMetaMorpho(address(vault)).lostAssets();
         if (lostAssetsOnMorpho > lastLostAssetsOnMorpho) return true; // already accrued, early exit
         return viewPendingLostAssets() > lostAssetsOnMorpho;
@@ -149,5 +153,17 @@ contract MorphoLossAwareCompounder is MorphoCompounder {
 
     function setAllowed(address _owner, bool _allowed) public onlyManagement {
         allowed[_owner] = _allowed;
+    }
+
+    // if loss exists, we need to trigger the tend which will trigger the report.
+    function _tendTrigger() internal view override returns (bool) {
+        return lossExists();
+    }
+
+    // if loss exists, trigger a report to realize the loss immediately.
+    function _tend(uint256 _totalIdle) internal override {
+        if (lossExists()) {
+            IKeeper(TokenizedStrategy.keeper()).report(address(this));
+        }
     }
 }

@@ -317,7 +317,15 @@ contract Yumbrella is Base4626Compounder {
                 Auction(auction).kick(address(asset));
             }
             // Eat the loss.
-            TokenizedStrategy.report();
+            IKeeper(TokenizedStrategy.keeper()).report(address(this));
+        }
+
+        // no loss so deposit idle to yield vault
+        uint256 idleSeniorVaultAssetBalance = SENIOR_ASSET.balanceOf(
+            address(this)
+        );
+        if (idleSeniorVaultAssetBalance > 0) {
+            vault.deposit(idleSeniorVaultAssetBalance, address(this));
         }
     }
 
@@ -350,6 +358,16 @@ contract Yumbrella is Base4626Compounder {
         SENIOR_VAULT.redeem(_amount, address(this), address(this));
     }
 
+    // just in case if the idle amounts needs to be manually deposited to the yield vault
+    function manualDepositToYieldVault(
+        uint256 _amount
+    ) external onlyManagement {
+        if (_amount == type(uint256).max) {
+            _amount = SENIOR_ASSET.balanceOf(address(this));
+        }
+        vault.deposit(_amount, address(this));
+    }
+
     /**
      * @dev Optional trigger to override if tend() will be used by the strategy.
      * This must be implemented if the strategy hopes to invoke _tend().
@@ -377,6 +395,11 @@ contract Yumbrella is Base4626Compounder {
                 }
             }
         }
+
+        if (SENIOR_ASSET.balanceOf(address(this)) > 0) {
+            return true;
+        }
+
         return false;
     }
 

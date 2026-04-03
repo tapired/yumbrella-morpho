@@ -28,6 +28,10 @@ contract ShutdownTest is Setup {
         // Make sure we can still withdraw the full amount
         uint256 balanceBefore = asset.balanceOf(user);
 
+        vm.prank(user);
+        yumbrella.requestWithdraw(_amount);
+        skip(yumbrella.withdrawCooldown() + 2);
+
         // Withdraw all funds
         vm.prank(user);
         yumbrella.redeem(_amount, user, user);
@@ -62,6 +66,10 @@ contract ShutdownTest is Setup {
 
         // Make sure we can still withdraw the full amount
         uint256 balanceBefore = asset.balanceOf(user);
+
+        vm.prank(user);
+        yumbrella.requestWithdraw(_amount);
+        skip(yumbrella.withdrawCooldown() + 2);
 
         // Withdraw all funds
         vm.prank(user);
